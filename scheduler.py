@@ -125,24 +125,33 @@ class Scheduler:
                     self._warmed = today
             return
 
+        pending_fin: list[tuple[dict, dict]] = []
         for due, task, sig, _index in sorted(due_now):
             if (now - due) > timedelta(seconds=120):
                 self._fired.add(sig)
                 self._log("warn", f"[{task.get('name')}] 错过触发超过 120 秒，跳过（{task['time']}）")
                 continue
             self._fired.add(sig)
-            self._fire(task, cfg)
+            name = task.get("name", task["time"])
+            self._log("info", f"[{name}] 触发（{task['time']}，{task['sort_by']}，{'升序' if task.get('ascending') else '降序'}）")
+            try:
+                pending_fin.append((task, self._engine.snapshot_only(task, cfg)))
+            except Exception as exc:
+                self._log("error", f"[{name}] 快照失败: {type(exc).__name__}: {exc}")
+        # 同刻多任务：先把所有任务的榜单快照抓完（每个 ~几十 ms），
+        # 再做补列/落盘，避免 1.4s 的补列请求链把后面任务的抓取时刻推后。
+        for task, snap in pending_fin:
+            self._finalize(task, cfg, snap)
 
-    def _fire(self, task: dict, cfg: dict) -> None:
+    def _finalize(self, task: dict, cfg: dict, snap: dict) -> None:
         name = task.get("name", task["time"])
-        self._log("info", f"[{name}] 触发（{task['time']}，{task['sort_by']}，{'升序' if task.get('ascending') else '降序'}）")
         started = time.perf_counter()
         try:
-            result = self._engine.run_task(task, cfg)
+            result = self._engine.finalize_task(task, cfg, snap)
             self._log(
                 "success",
                 f"[{name}] 完成：{result['count']} 行 -> {result['file_name']}"
-                f"（快照 {result['snapshot_ms']}ms + 补列 {result['enrich_ms']}ms）",
+                f"（快照 {result['snapshot_ms']}ms + 补列 {result['enrich_ms']}ms，全程 {round((time.perf_counter() - started) * 1000)}ms）",
                 file=result["file_name"],
             )
         except Exception as exc:

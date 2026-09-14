@@ -310,10 +310,13 @@ class CaptureEngine:
             except Exception:
                 pass
 
-    def run_task(self, task: dict, cfg: dict) -> dict:
-        """抓一次榜单首页并落盘，返回摘要（含表格数据用于界面预览）。"""
+    def snapshot_only(self, task: dict, cfg: dict) -> dict:
+        """只抓榜单排名（时刻敏感段）；补列/落盘由 finalize_task 完成。
+
+        同一秒挂多个任务时，调度器先对每个任务调用本方法把排名全部抓到手，
+        补列的秒级请求链不会再把后面任务的抓取时刻推后。
+        """
         started = datetime.now()
-        columns = task.get("columns") or cfg.get("columns") or DEFAULT_COLUMNS
         with self._lock:
             client = self.client
             t0 = time.perf_counter()
@@ -325,7 +328,15 @@ class CaptureEngine:
             )
             rank_rows = list(page.rows)
             snapshot_ms = (time.perf_counter() - t0) * 1000
+        return {"started": started, "rank_rows": rank_rows, "snapshot_ms": snapshot_ms}
 
+    def finalize_task(self, task: dict, cfg: dict, snap: dict) -> dict:
+        """对 snapshot_only 的结果补列并落盘（CSV + SQLite），返回摘要。"""
+        started = snap["started"]
+        rank_rows = snap["rank_rows"]
+        columns = task.get("columns") or cfg.get("columns") or DEFAULT_COLUMNS
+        with self._lock:
+            client = self.client
             t1 = time.perf_counter()
             try:
                 table = client.helpers.shortline_indicators([r.full_code for r in rank_rows])
@@ -381,12 +392,16 @@ class CaptureEngine:
             "rows": table_rows,
             "count": len(table_rows),
             "captured_at": started.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "snapshot_ms": round(snapshot_ms),
+            "snapshot_ms": round(snap["snapshot_ms"]),
             "enrich_ms": round(enrich_ms),
-            "total_ms": round((time.perf_counter() - t0) * 1000),
+            "total_ms": round(snap["snapshot_ms"] + (time.perf_counter() - t1) * 1000),
             "db_written": len(numeric_rows) if db_error is None else 0,
             "db_error": db_error,
         }
+
+    def run_task(self, task: dict, cfg: dict) -> dict:
+        """一步到位（手动「立即运行」用）；调度路径走 snapshot_only + finalize_task 两阶段。"""
+        return self.finalize_task(task, cfg, self.snapshot_only(task, cfg))
 
 
 ENGINE = CaptureEngine()
