@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import csv
+import json
+import random
 import re
 import threading
 import time
+import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 
@@ -187,6 +190,83 @@ class IndustryMap:
 
 INDUSTRY = IndustryMap()
 
+TRADE_CALENDAR_PATH = DOWNLOAD_DIR / "trade_calendar.csv"
+
+
+class TradeCalendar:
+    """深交所官网交易日历（含未来日期），缓存于 downloads/trade_calendar.csv。
+
+    eltdx 的 workdays 以上证指数历史日 K 推导日历，开盘前的“今天”还没有 K 线，
+    会被误判为非交易日并缓存一整天，导致当天任务全部不触发；
+    这里改用官方日历判断，日历不可用时退化为周一~周五启发式（宁可多跑）。
+    数据来源：http://www.szse.cn/api/report/exchange/onepersistenthour/monthList
+    """
+
+    def __init__(self) -> None:
+        self._days: dict[date, bool] = {}
+        self._lock = threading.Lock()
+        self._next_fetch_ok = 0.0
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(TRADE_CALENDAR_PATH, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    try:
+                        self._days[date.fromisoformat(row["jyrq"])] = row["jybz"] == "1"
+                    except (KeyError, ValueError):
+                        continue
+        except OSError:
+            pass
+
+    def _save(self) -> None:
+        try:
+            DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = TRADE_CALENDAR_PATH.with_suffix(".tmp")
+            with open(tmp, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=["jyrq", "jybz"])
+                writer.writeheader()
+                for day in sorted(self._days):
+                    writer.writerow({"jyrq": day.isoformat(), "jybz": "1" if self._days[day] else "0"})
+            tmp.replace(TRADE_CALENDAR_PATH)
+        except OSError:
+            pass
+
+    def _fetch_month(self, ym: str) -> bool:
+        url = (
+            "http://www.szse.cn/api/report/exchange/onepersistenthour/monthList"
+            f"?month={ym}&random={random.random()}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = (json.loads(resp.read().decode("utf-8")) or {}).get("data") or []
+        for item in rows:
+            try:
+                self._days[date.fromisoformat(item["jyrq"])] = item["jybz"] == "1"
+            except (KeyError, TypeError, ValueError):
+                continue
+        if rows:
+            self._save()
+            return True
+        return False
+
+    def is_trading_day(self, day: date) -> bool | None:
+        """返回 True/False；日历覆盖不到该月且拉取失败时返回 None。"""
+        with self._lock:
+            covered = any(d.year == day.year and d.month == day.month for d in self._days)
+            if not covered and time.monotonic() >= self._next_fetch_ok:
+                self._next_fetch_ok = time.monotonic() + 300  # 失败也别打爆官网
+                try:
+                    covered = self._fetch_month(f"{day:%Y-%m}")
+                except Exception:
+                    covered = False
+            if day in self._days:
+                return self._days[day]
+            return None
+
+
+TRADE_CALENDAR = TradeCalendar()
+
 
 def _fmt(value, digits: int = 2, suffix: str = "") -> str:
     if value is None:
@@ -289,10 +369,10 @@ class CaptureEngine:
     def today_is_workday(self) -> bool:
         with self._lock:
             if self._workday_checked_on != date.today():
-                try:
-                    self._is_workday = self.client.workdays.today_is_workday()
-                except Exception:
-                    self._is_workday = True  # 判断失败时按工作日处理，宁可多跑
+                verdict = TRADE_CALENDAR.is_trading_day(date.today())
+                if verdict is None:
+                    verdict = date.today().weekday() < 5  # 日历不可用时按工作日，宁可多跑
+                self._is_workday = verdict
                 self._workday_checked_on = date.today()
             return bool(self._is_workday)
 
