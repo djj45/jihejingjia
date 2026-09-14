@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>竞价榜单截取</title>
+<style>
+:root{--bg:#f4f6fa;--card:#fff;--line:#e3e8f0;--txt:#1f2937;--sub:#6b7280;--acc:#2563eb;--ok:#059669;--warn:#d97706;--err:#dc2626}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,"Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt);font-size:14px}
+.wrap{max-width:1080px;margin:0 auto;padding:16px}
+header{display:flex;align-items:center;gap:14px;padding:14px 18px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:14px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0}
+.badge{padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--line);color:var(--sub)}
+.badge.on{background:#ecfdf5;color:var(--ok);border-color:#a7f3d0}
+.badge.off{background:#fef2f2;color:var(--err);border-color:#fecaca}
+.clock{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--sub)}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+section h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+section h2 .hint{font-weight:400;font-size:12px;color:var(--sub)}
+button{cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 14px;font-size:13px}
+button:hover{border-color:var(--acc);color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.primary:hover{opacity:.9;color:#fff}
+button.danger:hover{border-color:var(--err);color:var(--err)}
+button.small{padding:3px 10px;font-size:12px}
+input,select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:13px;background:#fff;color:var(--txt)}
+.task{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;flex-wrap:wrap}
+.task .name{font-weight:600;min-width:90px}
+.task input[type=time]{width:120px}
+.task .dir{min-width:64px;text-align:center}
+.cols-selected{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.cols-selected li{display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--acc);background:#eff6ff;border-radius:8px;font-size:13px;cursor:grab}
+.cols-selected li .idx{color:var(--sub);font-size:11px}
+.cols-selected li.dragover{border-style:dashed}
+.pool{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.pool button{border-radius:999px;padding:4px 12px;font-size:12px;color:var(--sub)}
+.pool button.used{border-color:var(--acc);color:var(--acc);background:#eff6ff}
+.row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.snap-list{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.snap-item{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+.snap-item .fn{flex:1;word-break:break-all}
+.loglist{max-height:260px;overflow:auto;font-size:12.5px;display:flex;flex-direction:column;gap:4px}
+.logline{padding:6px 10px;border-radius:6px;background:#f9fafb;border:1px solid var(--line);white-space:pre-wrap;word-break:break-all}
+.logline.error{border-color:#fecaca;background:#fef2f2;color:var(--err)}
+.logline.success{border-color:#a7f3d0;background:#ecfdf5;color:var(--ok)}
+.logline.warn{border-color:#fde68a;background:#fffbeb;color:var(--warn)}
+.logline .t{color:var(--sub);margin-right:8px;font-variant-numeric:tabular-nums}
+.tblwrap{overflow:auto;max-height:460px;margin-top:10px;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{border-bottom:1px solid var(--line);padding:5px 10px;text-align:right;white-space:nowrap}
+th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
+thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
+.toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:10px;background:#111827;color:#fff;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+.toast.show{opacity:.95}
+.toast.err{background:var(--err)}
+.countdown{font-variant-numeric:tabular-nums;color:var(--acc);font-weight:600}
+.addform{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:10px;border-top:1px dashed var(--line)}
+.grid2{display:grid;grid-template-columns:300px 1fr;gap:14px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>竞价榜单截取</h1>
+  <span class="badge" id="workday">--</span>
+  <button id="toggle" class="primary">启动调度</button>
+  <span>下一任务 <span class="countdown" id="countdown">--:--:--</span></span>
+  <span class="clock" id="clock"></span>
+</header>
+
+<section>
+  <h2>截取任务 <span class="hint">时间精确到秒；到点自动抓排序首页并保存</span></h2>
+  <div id="tasks"></div>
+  <div class="addform">
+    <input id="add-name" placeholder="任务名" style="width:120px">
+    <input id="add-time" type="time" step="1" value="09:30:00" style="width:120px">
+    <select id="add-sort"></select>
+    <button id="add-btn" class="primary small">+ 添加任务</button>
+  </div>
+</section>
+
+<section>
+  <h2>表头 <span class="hint">点击候选词增删；拖动已选项调换顺序</span></h2>
+  <ul class="cols-selected" id="cols-selected"></ul>
+  <div class="pool" id="cols-pool"></div>
+</section>
+
+<section>
+  <h2>全局设置</h2>
+  <div class="row">
+    <label>每页条数 <input id="page-size" type="number" min="1" max="80" style="width:80px"></label>
+    <label>预热提前(秒) <input id="warmup" type="number" min="0" max="3600" style="width:80px"></label>
+    <button id="save" class="primary">保存全部配置</button>
+    <span class="hint" style="color:var(--sub);font-size:12px">保存后立即生效，无需重启</span>
+  </div>
+</section>
+
+<section>
+  <h2>快照浏览 <span class="hint">手动运行结果也会出现在当天文件里</span></h2>
+  <div class="grid2">
+    <div>
+      <div class="row"><input id="snap-date" type="date"><button id="snap-refresh" class="small">刷新</button></div>
+      <div id="snap-list" class="snap-list"></div>
+    </div>
+    <div id="snap-detail"></div>
+  </div>
+</section>
+
+<section>
+  <h2>历史数据库 <span class="hint">SQLite 文件 snapshots.db，每次截取自动入库（含全字段数值）</span></h2>
+  <div class="row">
+    <select id="db-date"></select>
+    <button id="db-import" class="small">导入历史CSV</button>
+    <label style="font-size:12px;color:var(--sub)"><input type="checkbox" id="meta-toggle"> 显示元信息列</label>
+    <span class="hint" id="db-stat" style="color:var(--sub);font-size:12px"></span>
+  </div>
+  <div id="db-runs" class="pool" style="margin-top:4px"></div>
+  <div class="row" style="margin-top:12px">
+    <textarea id="sql" style="flex:1;min-width:320px;height:64px;font-size:12.5px" placeholder="SELECT * FROM snapshots WHERE trade_date='2026-09-15' ORDER BY open_turnover_pct DESC"></textarea>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <button id="sql-run" class="primary">执行查询</button>
+      <button id="sql-ex1" class="small" title="按行业聚合">示例:行业分布</button>
+      <button id="sql-ex2" class="small" title="多日对比">示例:多日换手Top</button>
+    </div>
+  </div>
+  <div id="db-detail"></div>
+</section>
+
+<section>
+  <h2>运行日志</h2>
+  <div id="logs" class="loglist"></div>
+</section>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let cfg=null,meta=null,dragIdx=null;
+
+function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast show"+(err?" err":"");setTimeout(()=>t.className="toast",2200)}
+async function api(path,opt){const r=await fetch(path,opt);if(!r.ok){let d="";try{d=(await r.json()).detail}catch(e){}throw new Error(d||r.status)}return r.json()}
+
+/* ---------- 任务 ---------- */
+function renderTasks(){
+  const box=$("#tasks");box.innerHTML="";
+  cfg.tasks.forEach((t,i)=>{
+    const div=document.createElement("div");div.className="task";
+    div.innerHTML=`
+      <span class="name">${esc(t.name)}</span>
+      <input type="time" step="1" value="${t.time}">
+      <select>${meta.sort_options.map(s=>`<option ${s===t.sort_by?"selected":""}>${s}</option>`).join("")}</select>
+      <button class="small dir">${t.ascending?"升序 ↑":"降序 ↓"}</button>
+      <button class="small primary run">立即运行</button>
+      <button class="small danger del">删除</button>`;
+    const [timeIn,sel]=[div.querySelector("input"),div.querySelector("select")];
+    timeIn.onchange=()=>{t.time=timeIn.value||t.time};
+    sel.onchange=()=>{t.sort_by=sel.value};
+    div.querySelector(".dir").onclick=e=>{t.ascending=!t.ascending;e.target.textContent=t.ascending?"升序 ↑":"降序 ↓"};
+    div.querySelector(".del").onclick=()=>{cfg.tasks.splice(i,1);renderTasks()};
+    div.querySelector(".run").onclick=async e=>{
+      e.target.disabled=true;e.target.textContent="运行中…";
+      try{const res=await api("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task:t})});
+        showTable(res.columns,res.rows,`${res.file_name}（快照${res.snapshot_ms}ms/补列${res.enrich_ms}ms）`);
+        toast(`完成：${res.count} 行已保存`);loadSnaps();
+      }catch(err){toast("运行失败: "+err.message,true)}
+      e.target.disabled=false;e.target.textContent="立即运行";
+    };
+    box.appendChild(div);
+  });
+}
+
+/* ---------- 表头 ---------- */
+function renderCols(){
+  const sel=$("#cols-selected");sel.innerHTML="";
+  cfg.columns.forEach((c,i)=>{
+    const li=document.createElement("li");li.draggable=true;
+    li.innerHTML=`<span class="idx">${i+1}</span>${esc(c)}`;
+    li.ondragstart=()=>{dragIdx=i};
+    li.ondragover=e=>{e.preventDefault();li.classList.add("dragover")};
+    li.ondragleave=()=>li.classList.remove("dragover");
+    li.ondrop=e=>{e.preventDefault();if(dragIdx===null||dragIdx===i)return;
+      const[m]=cfg.columns.splice(dragIdx,1);cfg.columns.splice(i,0,m);dragIdx=null;renderCols()};
+    li.ondblclick=()=>{cfg.columns.splice(i,1);renderCols()};
+    sel.appendChild(li);
+  });
+  const pool=$("#cols-pool");pool.innerHTML="";
+  meta.available_columns.forEach(c=>{
+    const used=cfg.columns.includes(c);
+    const b=document.createElement("button");b.textContent=c+(used?" ✓":"");b.className=used?"used":"";
+    b.onclick=()=>{if(used)cfg.columns=cfg.columns.filter(x=>x!==c);else cfg.columns.push(c);renderCols()};
+    pool.appendChild(b);
+  });
+}
+
+/* ---------- 快照 ---------- */
+async function loadSnaps(){
+  const d=$("#snap-date").value.replace(/-/g,"");
+  const res=await api(`/api/snapshots?day=${d}`);
+  const box=$("#snap-list");box.innerHTML="";
+  if(!res.files.length){box.innerHTML='<span style="color:var(--sub)">当天暂无快照</span>';return}
+  res.files.forEach(f=>{
+    const div=document.createElement("div");div.className="snap-item";
+    div.innerHTML=`<span class="fn">${esc(f.name)}</span><span style="color:var(--sub);font-size:12px">${(f.size/1024).toFixed(1)}KB</span>
+      <a href="/api/snapshots/download?path=${encodeURIComponent(f.path)}"><button class="small">下载</button></a>`;
+    div.querySelector(".fn").onclick=async()=>{
+      const c=await api(`/api/snapshots/content?path=${encodeURIComponent(f.path)}`);
+      showTable(c.columns,c.rows,f.name);
+    };
+    box.appendChild(div);
+  });
+}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+
+/* 数据库字段 -> 中文表头 */
+const FIELD_ZH={id:"ID",trade_date:"交易日",capture_time:"截取时刻",task_name:"任务",sort_by:"排序字段",
+  direction:"方向",created_at:"入库时间",rank:"排名",code:"代码",name:"名称",industry:"细分行业",
+  change_pct:"涨幅%",seal_amount_yi:"封单额(亿)",open_amount_yi:"开盘金额(亿)",open_turnover_pct:"开盘换手%",
+  last_price:"现价",pre_close:"昨收",amount_yi:"成交额(亿)",volume_wan_hand:"成交量(万手)",
+  open_change_pct:"开盘涨幅%",rise_speed:"涨速%",short_turnover:"短换手%"};
+
+const META_COLS=new Set(["id","trade_date","capture_time","task_name","sort_by","direction","created_at"]);
+let lastDbTable=null;
+
+function renderDbTable(){
+  if(!lastDbTable)return;
+  const showMeta=document.querySelector("#meta-toggle").checked;
+  const keepIdx=[];
+  const keepCols=lastDbTable.columns.filter((c,i)=>{const ok=showMeta||!META_COLS.has(c);if(ok)keepIdx.push(i);return ok});
+  const rows=lastDbTable.rows.map(r=>keepIdx.map(i=>r[i]));
+  showTable(keepCols,rows,lastDbTable.title,"#db-detail");
+}
+
+function showTable(columns,rows,title,target){
+  const box=$(target||"#snap-detail");
+  const cell=c=>{let v=c===null||c===undefined?"":c;if(v==="desc")v="降序";else if(v==="asc")v="升序";return `<td>${esc(v)}</td>`};
+  const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map(cell).join("")}</tr>`).join("");
+  box.innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:4px">${esc(title||"")}</div>
+    <div class="tblwrap"><table><thead><tr>${columns.map(c=>`<th>${esc(FIELD_ZH[c]||c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+/* ---------- 历史数据库 ---------- */
+async function loadDbDates(){
+  const d = await api("/api/db/dates");
+  const sel = $("#db-date");
+  sel.innerHTML = d.dates.map(x=>`<option value="${x.trade_date}">${x.trade_date}（${x.runs} 次截取 / ${x.stocks} 只）</option>`).join("") || '<option value="">（暂无数据）</option>';
+  $("#db-stat").textContent = d.dates.length ? "" : "还没有入库数据，点「导入历史CSV」或运行一次任务";
+  if(d.dates.length) loadDbRuns(d.dates[0].trade_date);
+}
+async function loadDbRuns(day){
+  if(!day) return;
+  const r = await api(`/api/db/runs?day=${day}`);
+  const box = $("#db-runs");
+  box.innerHTML = r.runs.map(run=>
+    `<button class="small" data-day="${run.trade_date}" data-time="${run.capture_time}" data-task="${esc(run.task_name)}">
+      ${run.capture_time.slice(0,8)} ${esc(run.task_name)} · ${run.sort_by}${run.direction==="asc"?"↑":"↓"} · ${run.cnt}行</button>`).join("")
+    || '<span style="color:var(--sub);font-size:12px">该日无记录</span>';
+  box.querySelectorAll("button").forEach(b=>b.onclick=async()=>{
+    const c = await api(`/api/db/rows?day=${b.dataset.day}&time=${b.dataset.time}&task=${encodeURIComponent(b.dataset.task)}`);
+    lastDbTable={columns:c.columns,rows:c.rows,title:`${b.dataset.day} ${b.dataset.time} ${b.dataset.task}`};
+    renderDbTable();
+  });
+}
+function initDb(){
+  loadDbDates();
+  $("#db-date").onchange=e=>loadDbRuns(e.target.value);
+  $("#meta-toggle").onchange=renderDbTable;
+  $("#db-import").onclick=async()=>{
+    try{const s=await api("/api/db/import",{method:"POST"});
+      toast(`导入完成：${s.imported_runs} 个文件 ${s.imported_rows} 行（跳过 ${s.skipped} 个已入库）`);loadDbDates();}
+    catch(e){toast("导入失败: "+e.message,true)}
+  };
+  $("#sql-ex1").onclick=()=>{$("#sql").value=
+    `SELECT industry, COUNT(*) cnt, ROUND(AVG(change_pct),2) avg_pct\nFROM snapshots\nWHERE task_name='开盘换手榜'\nGROUP BY industry ORDER BY cnt DESC`;
+    $("#sql-run").click()};
+  $("#sql-ex2").onclick=()=>{$("#sql").value=
+    `SELECT trade_date, code, name, industry, open_turnover_pct, open_amount_yi\nFROM snapshots\nWHERE task_name='开盘换手榜' AND rank<=10\nORDER BY trade_date, rank`;
+    $("#sql-run").click()};
+  $("#sql-run").onclick=async()=>{
+    const sql=$("#sql").value.trim();
+    if(!sql){toast("请输入 SQL",true);return}
+    try{const r=await api("/api/db/query",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sql})});
+      showTable(r.columns,r.rows,`查询结果：${r.rows.length} 行`,"#db-detail");
+    }catch(e){toast("查询失败: "+e.message,true)}
+  };
+}
+
+/* ---------- 状态轮询 ---------- */
+async function poll(){
+  try{
+    const s=await api("/api/status");
+    $("#clock").textContent=s.now;
+    const wb=$("#workday");
+    wb.textContent=s.is_workday==null?"交易日检查中":(s.is_workday?"交易日":"非交易日");
+    wb.className="badge "+(s.is_workday==null?"":s.is_workday?"on":"off");
+    const tg=$("#toggle");
+    tg.textContent=s.scheduler_enabled?"停止调度":"启动调度";
+    tg.className=s.scheduler_enabled?"primary":"";
+    if(s.next_fire_ts){
+      const left=Math.max(0,s.next_fire_ts*1000-Date.now());
+      const h=Math.floor(left/3.6e6),m=Math.floor(left%3.6e6/6e4),sec=Math.floor(left%6e4/1e3);
+      $("#countdown").textContent=(s.next_task?s.next_task.name+" ":"")+`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+    }else $("#countdown").textContent="无待触发任务";
+    const lg=$("#logs");
+    const key=s.history.length?`${s.history[0].time}#${s.history[0].message.slice(0,30)}#${s.history.length}`:"";
+    if(key!==lg.dataset.key){
+      lg.dataset.key=key;
+      lg.innerHTML=s.history.map(h=>`<div class="logline ${h.level}"><span class="t">${h.time}</span>${esc(h.message)}</div>`).join("");
+    }
+  }catch(e){/* 服务重启间隙 */}
+}
+
+/* ---------- 初始化 ---------- */
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+
+(async function init(){
+  meta=await api("/api/meta");
+  cfg=await api("/api/config");
+  $("#add-sort").innerHTML=meta.sort_options.map(s=>`<option>${s}</option>`).join("");
+  $("#add-sort").value="涨幅";
+  $("#page-size").value=cfg.page_size;
+  $("#warmup").value=cfg.warmup_seconds;
+  $("#snap-date").value=meta.today;
+  renderTasks();renderCols();loadSnaps();initDb();
+  $("#add-btn").onclick=()=>{
+    const name=$("#add-name").value.trim()||"任务"+(cfg.tasks.length+1);
+    cfg.tasks.push({name,time:$("#add-time").value||"09:30:00",sort_by:$("#add-sort").value,ascending:false});
+    $("#add-name").value="";renderTasks();toast("已添加，记得保存配置");
+  };
+  $("#save").onclick=async()=>{
+    cfg.page_size=Math.max(1,Math.min(80,+$("#page-size").value||60));
+    cfg.warmup_seconds=Math.max(0,Math.min(3600,+$("#warmup").value||90));
+    try{await api("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)});toast("配置已保存并生效")}
+    catch(e){toast("保存失败: "+e.message,true)}
+  };
+  $("#toggle").onclick=async()=>{await api("/api/scheduler/toggle",{method:"POST"});poll()};
+  $("#snap-refresh").onclick=loadSnaps;
+  $("#snap-date").onchange=loadSnaps;
+  poll();setInterval(poll,1000);
+})();
+</script>
+</body>
+</html>

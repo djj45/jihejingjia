@@ -1,0 +1,10 @@
+# 运行时产物，不入库
+.venv/
+__pycache__/
+*.pyc
+snapshots/
+snapshots.db
+downloads/
+app.log
+# 个人配置（首次运行自动生成默认值）
+config.json
