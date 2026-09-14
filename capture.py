@@ -378,7 +378,7 @@ class CaptureEngine:
             return bool(self._is_workday)
 
     def warmup(self) -> None:
-        """预下载 zhb.zip 统计资源与行业映射，避免触发时刻才下载。"""
+        """预下载 zhb.zip 统计资源与行业映射，并试探一次榜单请求热身连接，避免触发时刻才建连。"""
         with self._lock:
             try:
                 self._stats_for_today()
@@ -386,6 +386,10 @@ class CaptureEngine:
                 pass
             try:
                 INDUSTRY.build(self.client)
+            except Exception:
+                pass
+            try:
+                self.client.helpers.realtime_rank(category="沪深A股", sort_by="涨幅", count=1, ascending=False)
             except Exception:
                 pass
 
