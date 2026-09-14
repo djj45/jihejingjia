@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_snap_date ON snapshots(trade_date);
 CREATE INDEX IF NOT EXISTS idx_snap_code ON snapshots(code);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_run_rank ON snapshots(trade_date, capture_time, task_name, rank);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_run_dir_rank ON snapshots(trade_date, capture_time, task_name, direction, rank);
+DROP INDEX IF EXISTS idx_snap_run_rank;
 CREATE TABLE IF NOT EXISTS imported_files (
   file_name TEXT PRIMARY KEY
 );

@@ -81,13 +81,17 @@ def validate_config(cfg: dict) -> list[str]:
     tasks = cfg.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         return ["tasks 必须是非空数组"]
-    seen_times: set[str] = set()
     for i, task in enumerate(tasks):
         if not isinstance(task, dict):
             errors.append(f"tasks[{i}] 必须是对象")
             continue
         name = str(task.get("name") or "").strip()
         tm = str(task.get("time") or "").strip()
+        parts = tm.split(":")
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            tm = f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"  # 部分浏览器 time 控件只回 HH:MM
+        task["name"] = name
+        task["time"] = tm
         if not name:
             errors.append(f"tasks[{i}].name 不能为空")
         if not TIME_RE.match(tm):
@@ -96,9 +100,6 @@ def validate_config(cfg: dict) -> list[str]:
             h, m, s = (int(x) for x in tm.split(":"))
             if not (0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59):
                 errors.append(f"tasks[{i}].time 超出范围: {tm}")
-            if tm in seen_times:
-                errors.append(f"tasks[{i}].time 与其他任务重复: {tm}")
-            seen_times.add(tm)
         if task.get("sort_by") not in SORT_OPTIONS:
             errors.append(f"tasks[{i}].sort_by 无效: {task.get('sort_by')!r}")
     columns = cfg.get("columns")

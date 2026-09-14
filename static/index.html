@@ -139,7 +139,7 @@ thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
 const $=s=>document.querySelector(s);
 let cfg=null,meta=null,dragIdx=null;
 
-function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast show"+(err?" err":"");setTimeout(()=>t.className="toast",2200)}
+function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast show"+(err?" err":"");setTimeout(()=>t.className="toast",err?4000:2200)}
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok){let d="";try{d=(await r.json()).detail}catch(e){}throw new Error(d||r.status)}return r.json()}
 
 /* ---------- 自动保存：任何配置改动即持久化，无需手动点保存 ---------- */
