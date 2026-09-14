@@ -148,13 +148,14 @@ function renderTasks(){
   cfg.tasks.forEach((t,i)=>{
     const div=document.createElement("div");div.className="task";
     div.innerHTML=`
-      <span class="name">${esc(t.name)}</span>
+      <input class="name" value="${esc(t.name)}" title="改名后回车或点别处生效" style="width:110px;font-weight:600">
       <input type="time" step="1" value="${t.time}">
       <select>${meta.sort_options.map(s=>`<option ${s===t.sort_by?"selected":""}>${s}</option>`).join("")}</select>
       <button class="small dir">${t.ascending?"升序 ↑":"降序 ↓"}</button>
       <button class="small primary run">立即运行</button>
       <button class="small danger del">删除</button>`;
-    const [timeIn,sel]=[div.querySelector("input"),div.querySelector("select")];
+    const nameIn=div.querySelector(".name"),timeIn=div.querySelector("input[type=time]"),sel=div.querySelector("select");
+    nameIn.onchange=()=>{t.name=nameIn.value.trim()||t.name;nameIn.value=t.name};
     timeIn.onchange=()=>{t.time=timeIn.value||t.time};
     sel.onchange=()=>{t.sort_by=sel.value};
     div.querySelector(".dir").onclick=e=>{t.ascending=!t.ascending;e.target.textContent=t.ascending?"升序 ↑":"降序 ↓"};
