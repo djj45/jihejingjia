@@ -126,7 +126,7 @@ class Scheduler:
             return
 
         pending_fin: list[tuple[dict, dict]] = []
-        for due, task, sig, _index in sorted(due_now):
+        for due, task, sig, _index in sorted(due_now, key=lambda item: item[0]):  # 同刻时 dict 不可比，仅按时刻排序
             if (now - due) > timedelta(seconds=120):
                 self._fired.add(sig)
                 self._log("warn", f"[{task.get('name')}] 错过触发超过 120 秒，跳过（{task['time']}）")
