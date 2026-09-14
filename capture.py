@@ -286,7 +286,7 @@ def _num(value, digits: int = 6):
         return None
 
 
-def _numeric_values(rank_row, shortline_row) -> dict:
+def _numeric_values(rank_row, open_turnover_pct) -> dict:
     """DB 字段名 -> 数值，全字段始终计算，不受展示表头配置影响。"""
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
@@ -302,7 +302,7 @@ def _numeric_values(rank_row, shortline_row) -> dict:
         "change_pct": _num(rank_row.change_pct),
         "seal_amount_yi": _num(rank_row.seal_amount and rank_row.seal_amount / 1e8),
         "open_amount_yi": _num(raw.open_amount and raw.open_amount / 1e8),
-        "open_turnover_pct": _num(getattr(shortline_row, "open_turnover_z", None)),
+        "open_turnover_pct": _num(open_turnover_pct),
         "last_price": _num(rank_row.last_price),
         "pre_close": _num(rank_row.pre_close),
         "amount_yi": _num(rank_row.amount and rank_row.amount / 1e8),
@@ -313,7 +313,7 @@ def _numeric_values(rank_row, shortline_row) -> dict:
     }
 
 
-def _row_values(rank_row, shortline_row) -> dict[str, str]:
+def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
     values = {
@@ -323,7 +323,7 @@ def _row_values(rank_row, shortline_row) -> dict[str, str]:
         "涨幅%": _fmt(rank_row.change_pct),
         "封单额(亿)": _fmt(rank_row.seal_amount and rank_row.seal_amount / 1e8, 3),
         "开盘金额(亿)": _fmt(raw.open_amount and raw.open_amount / 1e8, 3),
-        "开盘换手%": _fmt(getattr(shortline_row, "open_turnover_z", None)),
+        "开盘换手%": _fmt(open_turnover_pct),
         "现价": _fmt(rank_row.last_price),
         "昨收": _fmt(rank_row.pre_close),
         "成交额(亿)": _fmt(rank_row.amount and rank_row.amount / 1e8, 3),
@@ -344,7 +344,8 @@ class CaptureEngine:
     def __init__(self) -> None:
         self._client = None
         self._lock = threading.RLock()
-        self._shortline_warmed_on: date | None = None
+        self._stats = None
+        self._stats_day: date | None = None
         self._workday_checked_on: date | None = None
         self._is_workday: bool | None = None
 
@@ -377,18 +378,49 @@ class CaptureEngine:
             return bool(self._is_workday)
 
     def warmup(self) -> None:
-        """触发 zhb.zip 统计资源下载与行业映射构建，避免触发时刻才下载。"""
+        """预下载 zhb.zip 统计资源与行业映射，避免触发时刻才下载。"""
         with self._lock:
             try:
-                if self._shortline_warmed_on != date.today():
-                    self.client.helpers.shortline_indicators(["sz000001"])
-                    self._shortline_warmed_on = date.today()
+                self._stats_for_today()
             except Exception:
                 pass
             try:
                 INDUSTRY.build(self.client)
             except Exception:
                 pass
+
+    def _stats_for_today(self):
+        """当日 zhb.zip 统计资源（流通Z股本等），进程内缓存一天。"""
+        if self._stats is None or self._stats_day != date.today():
+            self._stats = self.client.resources.read_stats("zhb.zip")
+            self._stats_day = date.today()
+        return self._stats
+
+    def _open_turnover_map(self, rank_rows) -> dict[str, float | None]:
+        """开盘换手%（与 eltdx shortline open_turnover_z 同式，已实测一致）：
+        开盘成交量(手) = 榜单行 open_amount / (open_price*100)；
+        换手% = 成交量股数 / 流通Z股本 * 100。
+        开盘金额/开盘价取榜单行自身（与排名同一时刻），流通股本取日级统计资源，
+        避免 shortline_indicators 逐股日K/财务/全市场扫描的秒级请求链。
+        """
+        try:
+            stats = self._stats_for_today()
+        except Exception:
+            return {r.full_code: None for r in rank_rows}
+        result: dict[str, float | None] = {}
+        for r in rank_rows:
+            raw = r.raw
+            value = None
+            try:
+                stat_row, _ = stats.row(raw.market_id, raw.code)
+                ffs_10k = getattr(stat_row, "free_float_shares_10k", None) if stat_row else None
+                if ffs_10k and raw.open_price:
+                    open_volume_hand = raw.open_amount / (raw.open_price * 100.0)
+                    value = round(open_volume_hand * 100.0 / (ffs_10k * 10000.0) * 100.0, 6)
+            except Exception:
+                value = None
+            result[r.full_code] = value
+        return result
 
     def snapshot_only(self, task: dict, cfg: dict) -> dict:
         """只抓榜单排名（时刻敏感段）；补列/落盘由 finalize_task 完成。
@@ -418,11 +450,7 @@ class CaptureEngine:
         with self._lock:
             client = self.client
             t1 = time.perf_counter()
-            try:
-                table = client.helpers.shortline_indicators([r.full_code for r in rank_rows])
-                shortline_map = {row.full_code: row for row in table.rows}
-            except Exception:
-                shortline_map = {}
+            turnover_map = self._open_turnover_map(rank_rows)
             enrich_ms = (time.perf_counter() - t1) * 1000
 
             try:
@@ -433,10 +461,10 @@ class CaptureEngine:
         table_rows: list[dict[str, str]] = []
         numeric_rows: list[dict] = []
         for rank_row in rank_rows:
-            values = _row_values(rank_row, shortline_map.get(rank_row.full_code))
+            values = _row_values(rank_row, turnover_map.get(rank_row.full_code))
             values["细分行业"] = INDUSTRY.get(rank_row.full_code)
             table_rows.append({col: values.get(col, "") for col in columns})
-            numeric = _numeric_values(rank_row, shortline_map.get(rank_row.full_code))
+            numeric = _numeric_values(rank_row, turnover_map.get(rank_row.full_code))
             numeric["industry"] = values["细分行业"] or None
             numeric_rows.append(numeric)
 
