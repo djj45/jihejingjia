@@ -53,7 +53,7 @@ class Scheduler:
         for task in cfg.get("tasks", []):
             h, m, s = (int(x) for x in task["time"].split(":"))
             due = now.replace(hour=h, minute=m, second=s, microsecond=0)
-            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}", today)
+            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}|{task.get('ascending')}", today)
             if sig in self._fired:
                 continue
             if due < now and (now - due) > timedelta(seconds=120):
@@ -72,7 +72,7 @@ class Scheduler:
         for task in cfg.get("tasks", []):
             h, m, s = (int(x) for x in task["time"].split(":"))
             due = now.replace(hour=h, minute=m, second=s, microsecond=0)
-            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}", today)
+            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}|{task.get('ascending')}", today)
             if sig in self._fired:
                 continue
             if due < now and (now - due) > timedelta(seconds=120):
@@ -109,7 +109,7 @@ class Scheduler:
         for index, task in enumerate(cfg.get("tasks", [])):
             h, m, s = (int(x) for x in task["time"].split(":"))
             due = now.replace(hour=h, minute=m, second=s, microsecond=0)
-            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}", today.strftime("%Y%m%d"))
+            sig = (f"{task['time']}|{task.get('name')}|{task.get('sort_by')}|{task.get('ascending')}", today.strftime("%Y%m%d"))
             if sig in self._fired:
                 continue
             pending.append((due, task, sig, index))
