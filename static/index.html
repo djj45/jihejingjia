@@ -93,7 +93,7 @@ thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
     <label>每页条数 <input id="page-size" type="number" min="1" max="80" style="width:80px"></label>
     <label>预热提前(秒) <input id="warmup" type="number" min="0" max="3600" style="width:80px"></label>
     <button id="save" class="primary">保存全部配置</button>
-    <span class="hint" style="color:var(--sub);font-size:12px">保存后立即生效，无需重启</span>
+    <span class="hint" style="color:var(--sub);font-size:12px">改动会自动保存并即时生效，此按钮可手动触发</span>
   </div>
 </section>
 
@@ -142,6 +142,17 @@ let cfg=null,meta=null,dragIdx=null;
 function toast(msg,err){const t=$("#toast");t.textContent=msg;t.className="toast show"+(err?" err":"");setTimeout(()=>t.className="toast",2200)}
 async function api(path,opt){const r=await fetch(path,opt);if(!r.ok){let d="";try{d=(await r.json()).detail}catch(e){}throw new Error(d||r.status)}return r.json()}
 
+/* ---------- 自动保存：任何配置改动即持久化，无需手动点保存 ---------- */
+let saveTimer=null;
+async function saveNow(silent){
+  cfg.page_size=Math.max(1,Math.min(80,+$("#page-size").value||cfg.page_size));
+  cfg.warmup_seconds=Math.max(0,Math.min(3600,+$("#warmup").value||cfg.warmup_seconds));
+  try{await api("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)});
+    if(!silent)toast("配置已保存并生效")}
+  catch(e){toast("保存失败: "+e.message,true)}
+}
+function autoSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>saveNow(true),400)}
+
 /* ---------- 任务 ---------- */
 function renderTasks(){
   const box=$("#tasks");box.innerHTML="";
@@ -155,11 +166,11 @@ function renderTasks(){
       <button class="small primary run">立即运行</button>
       <button class="small danger del">删除</button>`;
     const nameIn=div.querySelector(".name"),timeIn=div.querySelector("input[type=time]"),sel=div.querySelector("select");
-    nameIn.onchange=()=>{t.name=nameIn.value.trim()||t.name;nameIn.value=t.name};
-    timeIn.onchange=()=>{t.time=timeIn.value||t.time};
-    sel.onchange=()=>{t.sort_by=sel.value};
-    div.querySelector(".dir").onclick=e=>{t.ascending=!t.ascending;e.target.textContent=t.ascending?"升序 ↑":"降序 ↓"};
-    div.querySelector(".del").onclick=()=>{cfg.tasks.splice(i,1);renderTasks()};
+    nameIn.onchange=()=>{t.name=nameIn.value.trim()||t.name;nameIn.value=t.name;autoSave()};
+    timeIn.onchange=()=>{t.time=timeIn.value||t.time;autoSave()};
+    sel.onchange=()=>{t.sort_by=sel.value;autoSave()};
+    div.querySelector(".dir").onclick=e=>{t.ascending=!t.ascending;e.target.textContent=t.ascending?"升序 ↑":"降序 ↓";autoSave()};
+    div.querySelector(".del").onclick=()=>{cfg.tasks.splice(i,1);renderTasks();autoSave()};
     div.querySelector(".run").onclick=async e=>{
       e.target.disabled=true;e.target.textContent="运行中…";
       try{const res=await api("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task:t})});
@@ -182,15 +193,15 @@ function renderCols(){
     li.ondragover=e=>{e.preventDefault();li.classList.add("dragover")};
     li.ondragleave=()=>li.classList.remove("dragover");
     li.ondrop=e=>{e.preventDefault();if(dragIdx===null||dragIdx===i)return;
-      const[m]=cfg.columns.splice(dragIdx,1);cfg.columns.splice(i,0,m);dragIdx=null;renderCols()};
-    li.ondblclick=()=>{cfg.columns.splice(i,1);renderCols()};
+      const[m]=cfg.columns.splice(dragIdx,1);cfg.columns.splice(i,0,m);dragIdx=null;renderCols();autoSave()};
+    li.ondblclick=()=>{cfg.columns.splice(i,1);renderCols();autoSave()};
     sel.appendChild(li);
   });
   const pool=$("#cols-pool");pool.innerHTML="";
   meta.available_columns.forEach(c=>{
     const used=cfg.columns.includes(c);
     const b=document.createElement("button");b.textContent=c+(used?" ✓":"");b.className=used?"used":"";
-    b.onclick=()=>{if(used)cfg.columns=cfg.columns.filter(x=>x!==c);else cfg.columns.push(c);renderCols()};
+    b.onclick=()=>{if(used)cfg.columns=cfg.columns.filter(x=>x!==c);else cfg.columns.push(c);renderCols();autoSave()};
     pool.appendChild(b);
   });
 }
@@ -327,14 +338,11 @@ function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&l
   $("#add-btn").onclick=()=>{
     const name=$("#add-name").value.trim()||"任务"+(cfg.tasks.length+1);
     cfg.tasks.push({name,time:$("#add-time").value||"09:30:00",sort_by:$("#add-sort").value,ascending:false});
-    $("#add-name").value="";renderTasks();toast("已添加，记得保存配置");
+    $("#add-name").value="";renderTasks();autoSave();
   };
-  $("#save").onclick=async()=>{
-    cfg.page_size=Math.max(1,Math.min(80,+$("#page-size").value||60));
-    cfg.warmup_seconds=Math.max(0,Math.min(3600,+$("#warmup").value||90));
-    try{await api("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)});toast("配置已保存并生效")}
-    catch(e){toast("保存失败: "+e.message,true)}
-  };
+  $("#save").onclick=()=>saveNow(false);
+  $("#page-size").onchange=autoSave;
+  $("#warmup").onchange=autoSave;
   $("#toggle").onclick=async()=>{await api("/api/scheduler/toggle",{method:"POST"});poll()};
   $("#snap-refresh").onclick=loadSnaps;
   $("#snap-date").onchange=loadSnaps;
