@@ -9,7 +9,7 @@ import re
 import threading
 import time
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
 from pathlib import Path
 
 import db
@@ -348,6 +348,8 @@ class CaptureEngine:
         self._stats_day: date | None = None
         self._workday_checked_on: date | None = None
         self._is_workday: bool | None = None
+        self._current_host: str | None = None
+        self._rotation_cursor = 0
 
     @property
     def client(self):
@@ -431,20 +433,68 @@ class CaptureEngine:
 
         同一秒挂多个任务时，调度器先对每个任务调用本方法把排名全部抓到手，
         补列的秒级请求链不会再把后面任务的抓取时刻推后。
+
+        竞价时段(09:05-09:30)若榜单呈现“未成形”状态（前列普遍 -100%/无价格，
+        即节点不提供竞价排序），自动轮换行情节点重抓，最多换 3 个；
+        全部未成形则返回最后一次结果（与无轮换时的行为一致）。
         """
         started = datetime.now()
+        in_auction = dtime(9, 5) <= started.time() <= dtime(9, 30)
+        max_rotations = 3 if in_auction else 0
+        fallback: dict | None = None
+        for attempt in range(max_rotations + 1):
+            try:
+                with self._lock:
+                    t0 = time.perf_counter()
+                    page = self.client.helpers.realtime_rank(
+                        category=cfg.get("category", "沪深A股"),
+                        sort_by=SORT_OPTIONS[task["sort_by"]],
+                        count=int(cfg.get("page_size", 60)),
+                        ascending=bool(task.get("ascending", False)),
+                    )
+                    rank_rows = list(page.rows)
+                    snapshot_ms = (time.perf_counter() - t0) * 1000
+            except Exception:
+                if attempt >= max_rotations:
+                    raise
+                rank_rows, snapshot_ms = None, 0.0
+            if rank_rows is not None:
+                snap = {"started": started, "rank_rows": rank_rows, "snapshot_ms": snapshot_ms, "rotations": attempt}
+                if not in_auction or not self._looks_unformed(rank_rows):
+                    return snap
+                fallback = snap  # 记住最近一次结果作为兜底
+            if attempt < max_rotations:
+                from eltdx.hosts import DEFAULT_HOSTS
+
+                self._rotation_cursor = (self._rotation_cursor + 1) % len(DEFAULT_HOSTS)
+                self._swap_client(DEFAULT_HOSTS[self._rotation_cursor])
+        return fallback
+
+    def _swap_client(self, host: str | None) -> None:
+        """丢弃当前连接，改用指定行情节点（None=自动选择）重建客户端。"""
+        from eltdx import TdxClient
+
         with self._lock:
-            client = self.client
-            t0 = time.perf_counter()
-            page = client.helpers.realtime_rank(
-                category=cfg.get("category", "沪深A股"),
-                sort_by=SORT_OPTIONS[task["sort_by"]],
-                count=int(cfg.get("page_size", 60)),
-                ascending=bool(task.get("ascending", False)),
-            )
-            rank_rows = list(page.rows)
-            snapshot_ms = (time.perf_counter() - t0) * 1000
-        return {"started": started, "rank_rows": rank_rows, "snapshot_ms": snapshot_ms}
+            old, self._client = self._client, None
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            self._client = TdxClient(hosts=[host], timeout=5) if host else TdxClient(timeout=5)
+            self._current_host = host
+
+    @staticmethod
+    def _looks_unformed(rank_rows) -> bool:
+        """竞价窗口判断榜单是否“未成形”：前 10 名里 ≥8 行无价格或涨幅≈-100%。"""
+        top = rank_rows[:10]
+        if not top:
+            return False
+        bad = sum(
+            1 for r in top
+            if (r.change_pct is not None and r.change_pct < -90) or not r.last_price
+        )
+        return bad >= 8
 
     def finalize_task(self, task: dict, cfg: dict, snap: dict) -> dict:
         """对 snapshot_only 的结果补列并落盘（CSV + SQLite），返回摘要。"""
@@ -509,6 +559,7 @@ class CaptureEngine:
             "total_ms": round(snap["snapshot_ms"] + (time.perf_counter() - t1) * 1000),
             "db_written": len(numeric_rows) if db_error is None else 0,
             "db_error": db_error,
+            "rotations": snap.get("rotations", 0),
         }
 
     def run_task(self, task: dict, cfg: dict) -> dict:
