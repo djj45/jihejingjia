@@ -34,6 +34,7 @@ python -m venv .venv
 - **交易日判断**：基准上证指数日 K；非交易日自动跳过；错过触发超 120 秒不补跑
 - **预热**：首任务前 90 秒（可配）建连并预下载统计资源，实测触发时快照仅 ~30ms
 - **快照浏览**：网页按日期查看/下载 CSV（UTF-8-BOM，Excel 直开）
+- **CSV 转图片**：`tools/csv2img.py` 把快照 CSV 渲染成通达信配色 PNG（见下文「CSV 转图片」）
 - **历史数据库**：每次截取自动双写 SQLite（`snapshots.db`），存全字段数值（不受表头配置影响）；网页按日期浏览，内置只读 SQL 查询框（仅 SELECT，自动 LIMIT 2000）；「导入历史CSV」把已有 CSV 文件回灌入库（自动去重、补行序排名）
 - **手动运行**：每张任务卡「立即运行」随时补拍
 
@@ -75,6 +76,30 @@ FROM snapshots WHERE task_name='开盘换手榜' GROUP BY industry ORDER BY cnt 
 SELECT trade_date, capture_time, task_name, rank, open_turnover_pct
 FROM snapshots WHERE code='sz000978' ORDER BY trade_date, capture_time;
 ```
+
+## CSV 转图片（通达信配色）
+
+`tools/csv2img.py` 把快照 CSV 渲染成 PNG，配色模仿通达信客户端：
+黑底；代码/名称黄色；涨幅与封单额红涨绿跌（涨停封单红、跌停封单绿）；开盘金额蓝色；
+其余列白色；无数据单元格灰色 `-`；当前排序列的表头高亮黄色；数值列右对齐、文字列左对齐。
+
+本机使用（需 Python 3.10+ 与 Pillow；仅本地出图，服务器无需安装）：
+
+```bash
+python -m pip install pillow
+py tools/csv2img.py snapshots/20260916/20260916_092500_925开盘金额榜_开盘金额_降序.csv   # Windows
+python3 tools/csv2img.py snapshots/20260916/*.csv                                     # macOS / Linux
+```
+
+PNG 生成在 CSV 同目录、同名 `.png`。可选参数：
+
+- `--scale 2`：渲染放大倍数（默认 2），放大查看不糊，要更清晰用 `--scale 3`
+- `--font-size 16`：基准字号（实际字号再乘 scale）
+- `--out 目录`：输出到指定目录（默认 CSV 旁边）
+
+显示规则：代码列自动去 sh/sz/bj 前缀；`(亿)` 结尾的金额列转通达信式中文单位
+（`4.48亿` / `450万` / `9900`），表头同步去掉 `(亿)` 后缀；字体优先黑体
+（Windows simhei，依次回退微软雅黑/宋体/macOS PingFang/Linux 文泉驿）。
 
 ## 注意
 
