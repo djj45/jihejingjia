@@ -286,10 +286,41 @@ def _num(value, digits: int = 6):
         return None
 
 
+def _fmt_amount_yi(value) -> str:
+    """金额(亿)：保留到元级（6位小数）再去尾零。3位小数只有万元精度，
+    集合竞价的小额开盘金额（如民德电子 9900 元=0.000099亿）会被吞成 0.000。"""
+    if value is None:
+        return ""
+    try:
+        return f"{value / 1e8:.6f}".rstrip("0").rstrip(".") or "0"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _seal_amount(rank_row) -> float | None:
+    """封单额（元），与通达信客户端同口径：封板才有值，未封板返回 None（客户端显示 -）。
+
+    0x054b 行情排序协议不下发封单字段，只有买卖一档价量；封板判定看一侧是否为空：
+    涨停=卖一为 0（无人卖），封单=买一价×买一量；跌停=买一为 0（无人买），封单=卖一价×卖一量；
+    两侧都有申报即未封板。eltdx 的 rank_row.seal_amount 只算买侧，跌停恒为 0，
+    未封板股则是普通买一额（数值极小，通达信显示 -）。服务端排序键为带符号封单额
+    （涨停正/跌停负/未封板沉底），故两个方向榜单前列都必是封板股。
+    """
+    raw = rank_row.raw
+    if not raw.bid1 and not raw.ask1:
+        return None  # 停牌/节点无该股数据
+    if not raw.ask1 and raw.bid1 and raw.bid_vol1:
+        return raw.bid1 * raw.bid_vol1 * 100.0  # 涨停封单（买一）
+    if not raw.bid1 and raw.ask1 and raw.ask_vol1:
+        return raw.ask1 * raw.ask_vol1 * 100.0  # 跌停封单（卖一）
+    return None
+
+
 def _numeric_values(rank_row, open_turnover_pct) -> dict:
     """DB 字段名 -> 数值，全字段始终计算，不受展示表头配置影响。"""
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
+    seal = _seal_amount(rank_row)
     try:
         open_change = (raw.open_price - pre) / pre * 100 if pre else None
     except TypeError:
@@ -300,7 +331,7 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
         "name": rank_row.name,
         "industry": None,  # 由调用方填充
         "change_pct": _num(rank_row.change_pct),
-        "seal_amount_yi": _num(rank_row.seal_amount and rank_row.seal_amount / 1e8),
+        "seal_amount_yi": _num(seal and seal / 1e8),
         "open_amount_yi": _num(raw.open_amount and raw.open_amount / 1e8),
         "open_turnover_pct": _num(open_turnover_pct),
         "last_price": _num(rank_row.last_price),
@@ -316,17 +347,18 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
 def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
+    seal = _seal_amount(rank_row)
     values = {
         "排名": str(rank_row.rank),
         "代码": rank_row.full_code,
         "名称": rank_row.name or "",
         "涨幅%": _fmt(rank_row.change_pct),
-        "封单额(亿)": _fmt(rank_row.seal_amount and rank_row.seal_amount / 1e8, 3),
-        "开盘金额(亿)": _fmt(raw.open_amount and raw.open_amount / 1e8, 3),
+        "封单额(亿)": _fmt_amount_yi(seal),
+        "开盘金额(亿)": _fmt_amount_yi(raw.open_amount),
         "开盘换手%": _fmt(open_turnover_pct),
         "现价": _fmt(rank_row.last_price),
         "昨收": _fmt(rank_row.pre_close),
-        "成交额(亿)": _fmt(rank_row.amount and rank_row.amount / 1e8, 3),
+        "成交额(亿)": _fmt_amount_yi(rank_row.amount),
         "成交量(万手)": _fmt(rank_row.volume_hand and rank_row.volume_hand / 1e4),
         "涨速%": _fmt(raw.rise_speed),
         "短换手%": _fmt(raw.short_turnover),
