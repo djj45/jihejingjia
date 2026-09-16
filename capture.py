@@ -441,6 +441,7 @@ class CaptureEngine:
         started = datetime.now()
         in_auction = dtime(9, 5) <= started.time() <= dtime(9, 30)
         max_rotations = 3 if in_auction else 0
+        pool = self._rotation_pool()
         fallback: dict | None = None
         for attempt in range(max_rotations + 1):
             try:
@@ -464,10 +465,8 @@ class CaptureEngine:
                     return snap
                 fallback = snap  # 记住最近一次结果作为兜底
             if attempt < max_rotations:
-                from eltdx.hosts import DEFAULT_HOSTS
-
-                self._rotation_cursor = (self._rotation_cursor + 1) % len(DEFAULT_HOSTS)
-                self._swap_client(DEFAULT_HOSTS[self._rotation_cursor])
+                self._rotation_cursor = (self._rotation_cursor + 1) % len(pool)
+                self._swap_client(pool[self._rotation_cursor])
         return fallback
 
     def _swap_client(self, host: str | None) -> None:
@@ -486,7 +485,11 @@ class CaptureEngine:
 
     @staticmethod
     def _looks_unformed(rank_rows) -> bool:
-        """竞价窗口判断榜单是否“未成形”：前 10 名里 ≥8 行无价格或涨幅≈-100%。"""
+        """竞价窗口判断榜单是否“未成形”：前 10 名里 ≥5 行无价格或涨幅≈-100%。
+
+        好节点上封单额/开盘金额/开盘换手榜的前列必然是有真实价格的委托，
+        混杂大量 -100% 说明节点不提供竞价排序。
+        """
         top = rank_rows[:10]
         if not top:
             return False
@@ -494,7 +497,25 @@ class CaptureEngine:
             1 for r in top
             if (r.change_pct is not None and r.change_pct < -90) or not r.last_price
         )
-        return bad >= 8
+        return bad >= 5
+
+    def _rotation_pool(self) -> tuple[str, ...]:
+        """轮换节点池：经典行情节点优先（若有缓存文件），云镜像兜底。"""
+        try:
+            pinned = [
+                line.strip()
+                for line in (DOWNLOAD_DIR / "classic_hosts.txt").read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+        except OSError:
+            pinned = []
+        if pinned:
+            from eltdx.hosts import DEFAULT_HOSTS
+
+            return tuple(pinned) + tuple(DEFAULT_HOSTS)
+        from eltdx.hosts import DEFAULT_HOSTS
+
+        return DEFAULT_HOSTS
 
     def finalize_task(self, task: dict, cfg: dict, snap: dict) -> dict:
         """对 snapshot_only 的结果补列并落盘（CSV + SQLite），返回摘要。"""
