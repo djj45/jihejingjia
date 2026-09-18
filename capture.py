@@ -11,6 +11,7 @@ import time
 import urllib.request
 from datetime import date, datetime, time as dtime
 from pathlib import Path
+from types import SimpleNamespace
 
 import db
 
@@ -297,15 +298,58 @@ def _fmt_amount_yi(value) -> str:
         return ""
 
 
+def _limit_ratio_pct(full_code: str, name: str | None) -> float | None:
+    """涨跌幅限制%：北交所30、科创/创业20、主板10（2026-07-06起主板ST亦为10%）；
+    N/C开头（上市初期）无限制。"""
+    upper_name = str(name or "").strip().upper()
+    if upper_name.startswith(("N", "C")):
+        return None
+    symbol = full_code[2:]
+    if full_code.startswith("bj"):
+        return 30.0
+    if full_code.startswith("sh688") or (full_code.startswith("sz") and symbol.startswith("30")):
+        return 20.0
+    return 10.0
+
+
+def _auction_view(rank_row):
+    """竞价时段行视图（09:15-09:25 未撮合）：last=0 但 bid1/ask1 镜像虚拟撮合价。
+
+    返回 (虚拟价, 涨幅%, 封单额元或None)；非竞价行返回 None。
+    封板判定用价格对比：bid1==涨停价 → 买队列 bid_vol1 即封单（09:18 实测
+    中材科技 64.56=58.69*1.1，队列 1.13亿→09:25 定格 22.5亿）；跌停对称取卖队列。
+    连续竞价时段不能用此判定（那时一侧为 0 才是封板，见 _seal_amount）。
+    """
+    raw = rank_row.raw
+    pre = raw.pre_close_price or rank_row.pre_close
+    if raw.last_price or not raw.bid1 or not pre:
+        return None
+    price = raw.bid1
+    pct = (price - pre) / pre * 100.0
+    seal = None
+    ratio = _limit_ratio_pct(rank_row.full_code, rank_row.name)
+    if ratio:
+        limit_up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
+        limit_down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
+        if abs(price - limit_up) <= 0.005 and raw.bid_vol1:
+            seal = price * raw.bid_vol1 * 100.0  # 涨停封单（买队列）
+        elif abs(price - limit_down) <= 0.005 and raw.ask_vol1:
+            seal = price * raw.ask_vol1 * 100.0  # 跌停封单（卖队列）
+    return price, pct, seal
+
+
 def _seal_amount(rank_row) -> float | None:
     """封单额（元），与通达信客户端同口径：封板才有值，未封板返回 None（客户端显示 -）。
 
     0x054b 行情排序协议不下发封单字段，只有买卖一档价量；封板判定看一侧是否为空：
     涨停=卖一为 0（无人卖），封单=买一价×买一量；跌停=买一为 0（无人买），封单=卖一价×卖一量；
-    两侧都有申报即未封板。eltdx 的 rank_row.seal_amount 只算买侧，跌停恒为 0，
-    未封板股则是普通买一额（数值极小，通达信显示 -）。服务端排序键为带符号封单额
+    两侧都有申报即未封板。竞价时段（未撮合，last=0）两侧镜像虚拟撮合价，改用价格对比
+    涨停/跌停判定（见 _auction_view）。服务端排序键为带符号封单额
     （涨停正/跌停负/未封板沉底），故两个方向榜单前列都必是封板股。
     """
+    auction = _auction_view(rank_row)
+    if auction is not None:
+        return auction[2]
     raw = rank_row.raw
     if not raw.bid1 and not raw.ask1:
         return None  # 停牌/节点无该股数据
@@ -321,6 +365,18 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
     seal = _seal_amount(rank_row)
+    auction = _auction_view(rank_row)
+    last = auction[0] if auction else rank_row.last_price
+    change_pct = auction[1] if auction else rank_row.change_pct
+    if not auction and not rank_row.last_price:
+        last = None  # 节点未回该股行情（如北交所竞价时段）：无价格不给误导值
+        change_pct = None
+    try:
+        open_change = (raw.open_price - pre) / pre * 100 if pre else None
+    except TypeError:
+        open_change = None
+    if auction:
+        open_change = auction[1]  # 竞价未开盘，开盘涨幅=虚拟撮合涨幅
     try:
         open_change = (raw.open_price - pre) / pre * 100 if pre else None
     except TypeError:
@@ -330,11 +386,11 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
         "code": rank_row.full_code,
         "name": rank_row.name,
         "industry": None,  # 由调用方填充
-        "change_pct": _num(rank_row.change_pct),
+        "change_pct": _num(change_pct),
         "seal_amount_yi": _num(seal and seal / 1e8),
         "open_amount_yi": _num(raw.open_amount and raw.open_amount / 1e8),
         "open_turnover_pct": _num(open_turnover_pct),
-        "last_price": _num(rank_row.last_price),
+        "last_price": _num(last),
         "pre_close": _num(rank_row.pre_close),
         "amount_yi": _num(rank_row.amount and rank_row.amount / 1e8),
         "volume_wan_hand": _num(rank_row.volume_hand and rank_row.volume_hand / 1e4),
@@ -348,21 +404,30 @@ def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
     seal = _seal_amount(rank_row)
+    auction = _auction_view(rank_row)
+    last = auction[0] if auction else rank_row.last_price
+    change_pct = auction[1] if auction else rank_row.change_pct
+    if not auction and not rank_row.last_price:
+        last = None  # 节点未回该股行情（如北交所竞价时段）：无价格不给误导值
+        change_pct = None
     values = {
         "排名": str(rank_row.rank),
         "代码": rank_row.full_code,
         "名称": rank_row.name or "",
-        "涨幅%": _fmt(rank_row.change_pct),
+        "涨幅%": _fmt(change_pct),
         "封单额(亿)": _fmt_amount_yi(seal),
         "开盘金额(亿)": _fmt_amount_yi(raw.open_amount),
         "开盘换手%": _fmt(open_turnover_pct),
-        "现价": _fmt(rank_row.last_price),
+        "现价": _fmt(last),
         "昨收": _fmt(rank_row.pre_close),
         "成交额(亿)": _fmt_amount_yi(rank_row.amount),
         "成交量(万手)": _fmt(rank_row.volume_hand and rank_row.volume_hand / 1e4),
         "涨速%": _fmt(raw.rise_speed),
         "短换手%": _fmt(raw.short_turnover),
     }
+    if auction:
+        values["开盘涨幅%"] = _fmt(auction[1])
+        return values
     try:
         values["开盘涨幅%"] = _fmt((raw.open_price - pre) / pre * 100) if pre else ""
     except TypeError:
@@ -517,17 +582,17 @@ class CaptureEngine:
 
     @staticmethod
     def _looks_unformed(rank_rows) -> bool:
-        """竞价窗口判断榜单是否“未成形”：前 10 名里 ≥5 行无价格或涨幅≈-100%。
+        """竞价窗口判断榜单是否"未成形"：前 10 名里 ≥5 行缺数据。
 
-        好节点上封单额/开盘金额/开盘换手榜的前列必然是有真实价格的委托，
-        混杂大量 -100% 说明节点不提供竞价排序。
+        好行 = 有昨收 且 (有现价 或 有买一价)。竞价时段 last=0 属正常（未撮合），
+        虚拟撮合价在 bid1 上；真正缺数据的行（节点不给竞价簿记）三者皆空。
         """
         top = rank_rows[:10]
         if not top:
             return False
         bad = sum(
             1 for r in top
-            if (r.change_pct is not None and r.change_pct < -90) or not r.last_price
+            if not ((r.raw.pre_close_price or r.pre_close) and (r.last_price or r.raw.bid1))
         )
         return bad >= 5
 
@@ -549,6 +614,57 @@ class CaptureEngine:
 
         return DEFAULT_HOSTS
 
+    def _refresh_stale_rows(self, rank_rows):
+        """0x054b 榜单页里无价格的行（典型：北交所股，节点首页不给行情簿）用 0x0547
+        逐码刷新补齐，与桌面客户端显示同口径（桌面滚到可见窗口即显示涨幅）。
+        返回 code -> 合成 rank_row；刷新不到的保留原行。"""
+        stale = [r for r in rank_rows if not r.last_price and not r.raw.bid1]
+        if not stale:
+            return {}
+        out: dict = {}
+        for i in range(0, len(stale), 80):
+            chunk = stale[i : i + 80]
+            try:
+                recs = self.client.quotes.refresh([r.full_code for r in chunk], cursors={})
+                recs = recs.records if hasattr(recs, "records") else recs
+                by = {rec.full_code: rec for rec in recs}
+            except Exception:
+                continue
+            for r in chunk:
+                rec = by.get(r.full_code)
+                if rec is None or not rec.last_price:
+                    continue
+                buys = list(rec.buy_levels or [])
+                sells = list(rec.sell_levels or [])
+                pre = float(rec.last_close_price or 0) or r.pre_close
+                last = float(rec.last_price)
+                raw = SimpleNamespace(
+                    pre_close_price=pre,
+                    last_price=last,
+                    open_price=float(rec.open_price or 0),
+                    bid1=float(buys[0].price) if buys else 0.0,
+                    bid_vol1=int(buys[0].volume) if buys else 0,
+                    ask1=float(sells[0].price) if sells else 0.0,
+                    ask_vol1=int(sells[0].volume) if sells else 0,
+                    open_amount=float(rec.open_amount_yuan or 0),
+                    amount=float(rec.amount or 0),
+                    rise_speed=0,
+                    short_turnover=0,
+                )
+                out[r.full_code] = SimpleNamespace(
+                    rank=r.rank,
+                    full_code=r.full_code,
+                    name=r.name,
+                    raw=raw,
+                    pre_close=pre,
+                    last_price=last,
+                    change_pct=(last - pre) / pre * 100 if pre else None,
+                    amount=raw.amount,
+                    volume_hand=int(rec.total_hand or 0),
+                    seal_amount=None,
+                )
+        return out
+
     def finalize_task(self, task: dict, cfg: dict, snap: dict) -> dict:
         """对 snapshot_only 的结果补列并落盘（CSV + SQLite），返回摘要。"""
         started = snap["started"]
@@ -557,6 +673,9 @@ class CaptureEngine:
         with self._lock:
             client = self.client
             t1 = time.perf_counter()
+            refreshed = self._refresh_stale_rows(rank_rows)
+            if refreshed:
+                rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
             turnover_map = self._open_turnover_map(rank_rows)
             enrich_ms = (time.perf_counter() - t1) * 1000
 

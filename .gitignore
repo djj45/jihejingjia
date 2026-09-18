@@ -8,3 +8,7 @@ downloads/
 app.log
 # 个人配置（首次运行自动生成默认值）
 config.json
+
+# 协议逆向临时产物
+rev/
+*.pcapng
