@@ -246,8 +246,23 @@ function renderDbTable(){
 
 function showTable(columns,rows,title,target){
   const box=$(target||"#snap-detail");
-  const cell=c=>{let v=c===null||c===undefined?"":c;if(v==="desc")v="降序";else if(v==="asc")v="升序";return `<td>${esc(v)}</td>`};
-  const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map(cell).join("")}</tr>`).join("");
+  const isAmt=c=>typeof c==="string"&&(c.endsWith("(亿)")||["seal_amount_yi","open_amount_yi","amount_yi"].includes(c));
+  /* 金额列按通达信口径显示：4位有效数字+中文单位（99.99亿/199.9亿/4000万/300.5万/30.27万） */
+  const fmtAmtYi=v=>{
+    if(v===""||v===null||v===undefined)return v;
+    const x=parseFloat(v);if(!isFinite(x))return v;
+    const yuan=x*1e8;let num,unit;
+    if(yuan>=1e8){num=yuan/1e8;unit="亿"}
+    else if(yuan>=1e4){num=yuan/1e4;unit="万"}
+    else{num=yuan;unit=""}
+    let s=num.toPrecision(4);
+    s=s.includes("e")?String(Number(num.toPrecision(4)).toFixed(0)):String(Number(s));
+    return s+unit;
+  };
+  const cell=(v,c)=>{let t=c===null||c===undefined?"":c;if(t==="desc")t="降序";else if(t==="asc")t="升序";
+    if(isAmt(c))t=fmtAmtYi(t);
+    return `<td>${esc(t)}</td>`};
+  const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map((v,i)=>cell(v,typeof columns[i]==="string"?columns[i]:"")).join("")}</tr>`).join("");
   box.innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:4px">${esc(title||"")}</div>
     <div class="tblwrap"><table><thead><tr>${columns.map(c=>`<th>${esc(FIELD_ZH[c]||c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
