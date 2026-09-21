@@ -251,12 +251,12 @@ function showTable(columns,rows,title,target){
   const fmtAmtYi=v=>{
     if(v===""||v===null||v===undefined)return v;
     const x=parseFloat(v);if(!isFinite(x))return v;
-    const yuan=x*1e8;let num,unit;
-    if(yuan>=1e8){num=yuan/1e8;unit="亿"}
-    else if(yuan>=1e4){num=yuan/1e4;unit="万"}
-    else{num=yuan;unit=""}
-    let s=num.toPrecision(4);
-    s=s.includes("e")?String(Number(num.toPrecision(4)).toFixed(0)):String(Number(s));
+    const yuan=x*1e8;let num,unit,sig;
+    if(yuan>=1e8){num=yuan/1e8;unit="亿";sig=(num>=1&&num<100)?3:4}
+    else if(yuan>=1e4){num=yuan/1e4;unit="万";sig=4}
+    else{num=yuan;unit="";sig=4}
+    let s=num.toPrecision(sig);
+    s=s.includes("e")?String(Number(num.toPrecision(sig)).toFixed(0)):String(Number(s));
     return s+unit;
   };
   const cell=(v,c)=>{let t=v===null||v===undefined?"":v;if(t==="desc")t="降序";else if(t==="asc")t="升序";

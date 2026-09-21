@@ -69,19 +69,20 @@ def strip_prefix(code: str) -> str:
 
 
 def fmt_amount(text: str) -> str:
-    """亿单位小数 -> 通达信式 4 位有效数字 + 中文单位：
-    22.517237 -> 22.52亿，0.045 -> 4500万，0.000053 -> 5300，199.95 -> 200亿。"""
+    """亿单位小数 -> 通达信式有效数字 + 中文单位：1~99亿 3 位（3.14亿/35.8亿），
+    100亿及以上 4 位（199.9亿），万/元级 4 位（4000万/300.5万/30.27万/5300）。"""
     v = parse_num(text)
     if v is None:
         return text
     yuan = v * 1e8
     if yuan >= 1e8:
         num, unit = yuan / 1e8, "亿"
+        sig = 3 if num < 100 else 4
     elif yuan >= 1e4:
-        num, unit = yuan / 1e4, "万"
+        num, unit, sig = yuan / 1e4, "万", 4
     else:
-        num, unit = yuan, ""
-    s = f"{num:.4g}"
+        num, unit, sig = yuan, "", 4
+    s = f"{num:.{sig}g}"
     if "e" in s or "E" in s:  # 大数防科学计数
         s = f"{num:.0f}"
     elif "." in s:
