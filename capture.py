@@ -269,6 +269,11 @@ class TradeCalendar:
 TRADE_CALENDAR = TradeCalendar()
 
 
+def _raw_dict(raw) -> dict:
+    """frozen dataclass 的 raw 转dict，便于 SimpleNamespace 改字段重建。"""
+    return {f: getattr(raw, f) for f in raw.__dataclass_fields__} if hasattr(raw, "__dataclass_fields__") else dict(vars(raw))
+
+
 def _fmt(value, digits: int = 2, suffix: str = "") -> str:
     if value is None:
         return ""
@@ -322,9 +327,9 @@ def _auction_view(rank_row):
     """
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
-    if raw.last_price or not raw.bid1 or not pre:
+    if raw.last_price or not (raw.bid1 or raw.ask1) or not pre:
         return None
-    price = raw.bid1
+    price = raw.bid1 or raw.ask1
     pct = (price - pre) / pre * 100.0
     seal = None
     ratio = _limit_ratio_pct(rank_row.full_code, rank_row.name)
@@ -658,6 +663,59 @@ class CaptureEngine:
 
         return DEFAULT_HOSTS
 
+    def _auction_seal_patch(self, rank_rows, started: datetime):
+        """竞价行封单真源补全：0x056a 集合竞价过程快照。
+
+        0x054b 竞价行的 bid_vol1/open_amount 是虚拟撮合的匹配量/匹配额（实测华锡有色
+        09:15 匹配量 701手 vs 真实未匹配队列 205323手=10.26亿），不是封单；服务端排序
+        键才是真实封单。对竞价封板候选行取 series 里 ≤抓取时刻的最近点，构造等效
+        连续行情行（涨停: 买一=价×队列/卖侧清零；跌停对称），后续 _auction_view/
+        零侧封单逻辑自动正确。窗口外不触发。"""
+        if not (dtime(9, 14, 50) <= started.time() <= dtime(9, 25, 10)):
+            return {}
+        cutoff = (started - started.replace(hour=9, minute=15, second=0, microsecond=0)).seconds
+        stale = []
+        for r in rank_rows:
+            raw = r.raw
+            if raw.last_price or not raw.bid1:
+                continue  # 非竞价行
+            pre = raw.pre_close_price or r.pre_close
+            ratio = _limit_ratio_pct(r.full_code, r.name)
+            if not pre or not ratio:
+                continue
+            up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
+            down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
+            if abs(raw.bid1 - up) <= 0.005 or abs(raw.bid1 - down) <= 0.005:
+                stale.append(r)
+        if not stale:
+            return {}
+        out: dict = {}
+        for r in stale:
+            try:
+                series = self.client.auctions.series(r.full_code)
+            except Exception:
+                continue
+            pts = [p for p in (series.points or []) if p.time_seconds - 33300 <= cutoff]
+            if not pts:
+                continue
+            p = pts[-1]
+            price = p.price_milli / 1000.0
+            vol = p.unmatched_volume or 0
+            if not price or not vol:
+                continue
+            raw = r.raw
+            if (p.unmatched_direction_raw or 0) < 0:  # 卖侧队列：跌停
+                new_raw = SimpleNamespace(**{**_raw_dict(raw), "bid1": 0.0, "bid_vol1": 0,
+                                             "ask1": price, "ask_vol1": vol})
+            else:  # 买侧队列：涨停
+                new_raw = SimpleNamespace(**{**_raw_dict(raw), "bid1": price, "bid_vol1": vol,
+                                             "ask1": 0.0, "ask_vol1": 0})
+            out[r.full_code] = SimpleNamespace(
+                rank=r.rank, full_code=r.full_code, name=r.name, raw=new_raw,
+                pre_close=r.pre_close, last_price=r.last_price, change_pct=r.change_pct,
+                amount=r.amount, volume_hand=r.volume_hand, seal_amount=None)
+        return out
+
     def _refresh_stale_rows(self, rank_rows):
         """0x054b 榜单页里无价格的行（典型：北交所股，节点首页不给行情簿）用 0x0547
         逐码刷新补齐，与桌面客户端显示同口径（桌面滚到可见窗口即显示涨幅）。
@@ -717,6 +775,9 @@ class CaptureEngine:
         with self._lock:
             client = self.client
             t1 = time.perf_counter()
+            seal_patch = self._auction_seal_patch(rank_rows, started)
+            if seal_patch:
+                rank_rows = [seal_patch.get(r.full_code, r) for r in rank_rows]
             refreshed = self._refresh_stale_rows(rank_rows)
             if refreshed:
                 rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
