@@ -435,6 +435,50 @@ def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
     return values
 
 
+def _signed_seal(rank_row) -> float | None:
+    """带符号封单额（服务端 0x054b 排序口径）：涨停正、跌停负、未封板 None。
+
+    竞价时段服务端排序键与本地队列计算不同源（2026-09-21 实测 915 榜 27/59 逆序，
+    0.537 亿被排在第 28 位），封单额任务需本地重排；此函数提供统一的重排键。"""
+    raw = rank_row.raw
+    if not raw.last_price and raw.bid1:  # 竞价行
+        auction = _auction_view(rank_row)
+        if auction:
+            price, _pct, seal = auction
+            pre = raw.pre_close_price or rank_row.pre_close
+            ratio = _limit_ratio_pct(rank_row.full_code, rank_row.name)
+            if seal and ratio:
+                limit_down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
+                return -seal if abs(price - limit_down) <= 0.005 else seal
+        return None
+    if not raw.ask1 and raw.bid1 and raw.bid_vol1:
+        return raw.bid1 * raw.bid_vol1 * 100.0  # 连续时段涨停封单
+    if not raw.bid1 and raw.ask1 and raw.ask_vol1:
+        return -(raw.ask1 * raw.ask_vol1 * 100.0)  # 连续时段跌停封单
+    return None
+
+
+def _rerank_by_seal(rank_rows, ascending: bool):
+    """封单额榜本地重排：按带符号封单额排（降序=大买封在前，升序=大卖封在前），
+    无封单行沉底；rank 重编为页内序号。"""
+    def key(r):
+        v = _signed_seal(r)
+        if v is None:
+            return (1, 0.0)
+        return (0, v if ascending else -v)
+
+    ordered = sorted(rank_rows, key=key)
+    out = []
+    for i, r in enumerate(ordered, 1):
+        if r.rank != i:
+            r = SimpleNamespace(rank=i, full_code=r.full_code, name=r.name, raw=r.raw,
+                                pre_close=r.pre_close, last_price=r.last_price,
+                                change_pct=r.change_pct, amount=r.amount,
+                                volume_hand=r.volume_hand, seal_amount=None)
+        out.append(r)
+    return out
+
+
 class CaptureEngine:
     """持有 TdxClient 与各缓存，run_task 可被调度线程或 API 手动触发。"""
 
@@ -676,6 +720,8 @@ class CaptureEngine:
             refreshed = self._refresh_stale_rows(rank_rows)
             if refreshed:
                 rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
+            if task.get("sort_by") == "封单额":
+                rank_rows = _rerank_by_seal(rank_rows, bool(task.get("ascending")))
             turnover_map = self._open_turnover_map(rank_rows)
             enrich_ms = (time.perf_counter() - t1) * 1000
 

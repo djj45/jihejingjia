@@ -259,10 +259,10 @@ function showTable(columns,rows,title,target){
     s=s.includes("e")?String(Number(num.toPrecision(4)).toFixed(0)):String(Number(s));
     return s+unit;
   };
-  const cell=(v,c)=>{let t=c===null||c===undefined?"":c;if(t==="desc")t="降序";else if(t==="asc")t="升序";
+  const cell=(v,c)=>{let t=v===null||v===undefined?"":v;if(t==="desc")t="降序";else if(t==="asc")t="升序";
     if(isAmt(c))t=fmtAmtYi(t);
     return `<td>${esc(t)}</td>`};
-  const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map((v,i)=>cell(v,typeof columns[i]==="string"?columns[i]:"")).join("")}</tr>`).join("");
+  const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map((v,i)=>cell(v,columns[i])).join("")}</tr>`).join("");
   box.innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:4px">${esc(title||"")}</div>
     <div class="tblwrap"><table><thead><tr>${columns.map(c=>`<th>${esc(FIELD_ZH[c]||c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
