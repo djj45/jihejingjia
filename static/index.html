@@ -263,8 +263,9 @@ function showTable(columns,rows,title,target){
     if(isAmt(c))t=fmtAmtYi(t);
     return `<td>${esc(t)}</td>`};
   const body=rows.map(r=>`<tr>${(Array.isArray(r)?r:columns.map(c=>r[c])).map((v,i)=>cell(v,columns[i])).join("")}</tr>`).join("");
+  const hdr=c=>{const t=FIELD_ZH[c]||c;return esc(typeof t==="string"&&t.endsWith("(亿)")?t.slice(0,-3):t)};
   box.innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:4px">${esc(title||"")}</div>
-    <div class="tblwrap"><table><thead><tr>${columns.map(c=>`<th>${esc(FIELD_ZH[c]||c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+    <div class="tblwrap"><table><thead><tr>${columns.map(c=>`<th>${hdr(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 /* ---------- 历史数据库 ---------- */
