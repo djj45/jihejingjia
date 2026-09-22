@@ -446,7 +446,11 @@ def _signed_seal(rank_row) -> float | None:
     竞价时段服务端排序键与本地队列计算不同源（2026-09-21 实测 915 榜 27/59 逆序，
     0.537 亿被排在第 28 位），封单额任务需本地重排；此函数提供统一的重排键。"""
     raw = rank_row.raw
-    if not raw.last_price and raw.bid1:  # 竞价行
+    if not raw.last_price:
+        # 竞价/无数据行一律以 _auction_view 为准（封板才有键）。竞价头几秒部分股票
+        # 行情簿单边（如 bid1=0、仅卖侧虚拟价），若落入下方连续时段零侧分支，会把
+        # 虚拟价×匹配量冒充封单产生幻影键，未封板行被插进榜单中段（2026-09-22 915
+        # 两榜实测：和顺石油 +1.96% 出现在跌停榜第 4 行）。
         auction = _auction_view(rank_row)
         if auction:
             price, _pct, seal = auction
@@ -677,15 +681,16 @@ class CaptureEngine:
         stale = []
         for r in rank_rows:
             raw = r.raw
-            if raw.last_price or not raw.bid1:
-                continue  # 非竞价行
+            if raw.last_price or not (raw.bid1 or raw.ask1):
+                continue  # 非竞价行（虚拟撮合价可能在任一侧，含头几秒的单边簿）
             pre = raw.pre_close_price or r.pre_close
             ratio = _limit_ratio_pct(r.full_code, r.name)
             if not pre or not ratio:
                 continue
             up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
             down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
-            if abs(raw.bid1 - up) <= 0.005 or abs(raw.bid1 - down) <= 0.005:
+            vprice = raw.bid1 or raw.ask1
+            if abs(vprice - up) <= 0.005 or abs(vprice - down) <= 0.005:
                 stale.append(r)
         if not stale:
             return {}
@@ -742,15 +747,16 @@ class CaptureEngine:
             if r.full_code in known:
                 continue
             raw = r.raw
-            if raw.last_price or not raw.bid1:
-                continue  # 非竞价行
+            if raw.last_price or not (raw.bid1 or raw.ask1):
+                continue  # 非竞价行（虚拟撮合价可能在任一侧，含头几秒的单边簿）
             pre = raw.pre_close_price or r.pre_close
             ratio = _limit_ratio_pct(r.full_code, r.name)
             if not pre or not ratio:
                 continue
             up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
             down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
-            if abs(raw.bid1 - up) <= 0.005 or abs(raw.bid1 - down) <= 0.005:
+            vprice = raw.bid1 or raw.ask1
+            if abs(vprice - up) <= 0.005 or abs(vprice - down) <= 0.005:
                 add.append(r)
                 known.add(r.full_code)
         return rank_rows + add, [r.full_code for r in add]
