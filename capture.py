@@ -317,6 +317,21 @@ def _limit_ratio_pct(full_code: str, name: str | None) -> float | None:
     return 10.0
 
 
+def _open_price_of(rank_row, before_open_cont: bool) -> float | None:
+    """开盘价，容忍 0x054b 行 open_price 字段的逐股滞后（2026-09-22 925 榜龙头股份/
+    南威软件 open_amount 有值但 open_price 为空：开盘换手算不出、开盘涨幅成 -100）。
+    09:30 连续竞价开始前 last 即撮合开盘价；仍呈竞价形态（last=0）的行用虚拟撮合价。"""
+    raw = rank_row.raw
+    if getattr(raw, "open_price", None):
+        return raw.open_price
+    if not before_open_cont:
+        return None
+    if raw.last_price:
+        return raw.last_price
+    v = raw.bid1 or raw.ask1
+    return v or None
+
+
 def _auction_view(rank_row):
     """竞价时段行视图（09:15-09:25 未撮合）：last=0 但 bid1/ask1 镜像虚拟撮合价。
 
@@ -365,7 +380,7 @@ def _seal_amount(rank_row) -> float | None:
     return None
 
 
-def _numeric_values(rank_row, open_turnover_pct) -> dict:
+def _numeric_values(rank_row, open_turnover_pct, before_open_cont: bool = False) -> dict:
     """DB 字段名 -> 数值，全字段始终计算，不受展示表头配置影响。"""
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
@@ -376,16 +391,11 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
     if not auction and not rank_row.last_price:
         last = None  # 节点未回该股行情（如北交所竞价时段）：无价格不给误导值
         change_pct = None
-    try:
-        open_change = (raw.open_price - pre) / pre * 100 if pre else None
-    except TypeError:
-        open_change = None
     if auction:
         open_change = auction[1]  # 竞价未开盘，开盘涨幅=虚拟撮合涨幅
-    try:
-        open_change = (raw.open_price - pre) / pre * 100 if pre else None
-    except TypeError:
-        open_change = None
+    else:
+        op = _open_price_of(rank_row, before_open_cont)
+        open_change = (op - pre) / pre * 100 if op and pre else None
     return {
         "rank": rank_row.rank,
         "code": rank_row.full_code,
@@ -405,7 +415,7 @@ def _numeric_values(rank_row, open_turnover_pct) -> dict:
     }
 
 
-def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
+def _row_values(rank_row, open_turnover_pct, before_open_cont: bool = False) -> dict[str, str]:
     raw = rank_row.raw
     pre = raw.pre_close_price or rank_row.pre_close
     seal = _seal_amount(rank_row)
@@ -433,10 +443,8 @@ def _row_values(rank_row, open_turnover_pct) -> dict[str, str]:
     if auction:
         values["开盘涨幅%"] = _fmt(auction[1])
         return values
-    try:
-        values["开盘涨幅%"] = _fmt((raw.open_price - pre) / pre * 100) if pre else ""
-    except TypeError:
-        values["开盘涨幅%"] = ""
+    op = _open_price_of(rank_row, before_open_cont)
+    values["开盘涨幅%"] = _fmt((op - pre) / pre * 100) if op and pre else ""
     return values
 
 
@@ -552,13 +560,15 @@ class CaptureEngine:
             self._stats_day = date.today()
         return self._stats
 
-    def _open_turnover_map(self, rank_rows) -> dict[str, float | None]:
+    def _open_turnover_map(self, rank_rows, started: datetime) -> dict[str, float | None]:
         """开盘换手%（与 eltdx shortline open_turnover_z 同式，已实测一致）：
         开盘成交量(手) = 榜单行 open_amount / (open_price*100)；
         换手% = 成交量股数 / 流通Z股本 * 100。
         开盘金额/开盘价取榜单行自身（与排名同一时刻），流通股本取日级统计资源，
         避免 shortline_indicators 逐股日K/财务/全市场扫描的秒级请求链。
+        open_price 字段逐股滞后时用 _open_price_of 兜底（09:30 前 last=开盘价）。
         """
+        before_open_cont = started.time() < dtime(9, 30)
         try:
             stats = self._stats_for_today()
         except Exception:
@@ -570,8 +580,9 @@ class CaptureEngine:
             try:
                 stat_row, _ = stats.row(raw.market_id, raw.code)
                 ffs_10k = getattr(stat_row, "free_float_shares_10k", None) if stat_row else None
-                if ffs_10k and raw.open_price:
-                    open_volume_hand = raw.open_amount / (raw.open_price * 100.0)
+                open_price = _open_price_of(r, before_open_cont)
+                if ffs_10k and open_price:
+                    open_volume_hand = raw.open_amount / (open_price * 100.0)
                     value = round(open_volume_hand * 100.0 / (ffs_10k * 10000.0) * 100.0, 6)
             except Exception:
                 value = None
@@ -834,7 +845,7 @@ class CaptureEngine:
                 page_size = int(cfg.get("page_size", 60))
                 if len(rank_rows) > page_size:  # 补漏并入后裁回页大小（尾部无封单行沉底）
                     rank_rows = rank_rows[:page_size]
-            turnover_map = self._open_turnover_map(rank_rows)
+            turnover_map = self._open_turnover_map(rank_rows, started)
             enrich_ms = (time.perf_counter() - t1) * 1000
 
             try:
@@ -842,13 +853,14 @@ class CaptureEngine:
             except Exception:
                 pass
 
+        before_open_cont = started.time() < dtime(9, 30)
         table_rows: list[dict[str, str]] = []
         numeric_rows: list[dict] = []
         for rank_row in rank_rows:
-            values = _row_values(rank_row, turnover_map.get(rank_row.full_code))
+            values = _row_values(rank_row, turnover_map.get(rank_row.full_code), before_open_cont)
             values["细分行业"] = INDUSTRY.get(rank_row.full_code)
             table_rows.append({col: values.get(col, "") for col in columns})
-            numeric = _numeric_values(rank_row, turnover_map.get(rank_row.full_code))
+            numeric = _numeric_values(rank_row, turnover_map.get(rank_row.full_code), before_open_cont)
             numeric["industry"] = values["细分行业"] or None
             numeric_rows.append(numeric)
 
