@@ -149,10 +149,16 @@ class Scheduler:
         try:
             result = self._engine.finalize_task(task, cfg, snap)
             rot = result.get("rotations") or 0
+            aug = result.get("augmented") or []
+            aug_text = ""
+            if aug:
+                codes = ",".join(aug[:4]) + ("…" if len(aug) > 4 else "")
+                aug_text = f"，涨幅榜补漏{len(aug)}只({codes})"
             self._log(
                 "success",
                 f"[{name}] 完成：{result['count']} 行 -> {result['file_name']}"
-                f"（快照 {result['snapshot_ms']}ms + 补列 {result['enrich_ms']}ms，全程 {round((time.perf_counter() - started) * 1000)}ms{f'，换节点{rot}次' if rot else ''}）",
+                f"（快照 {result['snapshot_ms']}ms + 补列 {result['enrich_ms']}ms，全程 {round((time.perf_counter() - started) * 1000)}ms"
+                f"{f'，换节点{rot}次' if rot else ''}{aug_text}）",
                 file=result["file_name"],
             )
         except Exception as exc:

@@ -716,6 +716,45 @@ class CaptureEngine:
                 amount=r.amount, volume_hand=r.volume_hand, seal_amount=None)
         return out
 
+    def _augment_seal_rows(self, rank_rows, task: dict, cfg: dict, started: datetime):
+        """竞价封单榜补漏：涨幅榜（价格源）发现封板股。
+
+        服务端 0x054b 封单排序对个股有逐股放行滞后（2026-09-22 实测：综艺股份等
+        09:15:08 才进入排序页，新华传媒队列 09:15:03 已 94.7亿 却直到 09:19:59
+        才上榜），纯镜像排序页会整行漏股；桌面客户端正确是因为本地簿重排。这里按
+        任务方向取涨幅榜头部（降序=涨停在前，升序=跌停在前），把不在封单页里的
+        封板候选并入，封单真源仍由 _auction_seal_patch 取 0x056a。返回(行, 漏股代码)。"""
+        if not (dtime(9, 14, 50) <= started.time() <= dtime(9, 25, 10)):
+            return rank_rows, []
+        try:
+            page = self.client.helpers.realtime_rank(
+                category=cfg.get("category", "沪深A股"),
+                sort_by=SORT_OPTIONS["涨幅"],
+                count=100,
+                ascending=bool(task.get("ascending", False)),
+            )
+            extra = list(page.rows)
+        except Exception:
+            return rank_rows, []  # 补漏失败不影响主榜单
+        known = {r.full_code for r in rank_rows}
+        add = []
+        for r in extra:
+            if r.full_code in known:
+                continue
+            raw = r.raw
+            if raw.last_price or not raw.bid1:
+                continue  # 非竞价行
+            pre = raw.pre_close_price or r.pre_close
+            ratio = _limit_ratio_pct(r.full_code, r.name)
+            if not pre or not ratio:
+                continue
+            up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
+            down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
+            if abs(raw.bid1 - up) <= 0.005 or abs(raw.bid1 - down) <= 0.005:
+                add.append(r)
+                known.add(r.full_code)
+        return rank_rows + add, [r.full_code for r in add]
+
     def _refresh_stale_rows(self, rank_rows):
         """0x054b 榜单页里无价格的行（典型：北交所股，节点首页不给行情簿）用 0x0547
         逐码刷新补齐，与桌面客户端显示同口径（桌面滚到可见窗口即显示涨幅）。
@@ -775,6 +814,9 @@ class CaptureEngine:
         with self._lock:
             client = self.client
             t1 = time.perf_counter()
+            augmented: list[str] = []
+            if task.get("sort_by") == "封单额":
+                rank_rows, augmented = self._augment_seal_rows(rank_rows, task, cfg, started)
             seal_patch = self._auction_seal_patch(rank_rows, started)
             if seal_patch:
                 rank_rows = [seal_patch.get(r.full_code, r) for r in rank_rows]
@@ -783,6 +825,9 @@ class CaptureEngine:
                 rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
             if task.get("sort_by") == "封单额":
                 rank_rows = _rerank_by_seal(rank_rows, bool(task.get("ascending")))
+                page_size = int(cfg.get("page_size", 60))
+                if len(rank_rows) > page_size:  # 补漏并入后裁回页大小（尾部无封单行沉底）
+                    rank_rows = rank_rows[:page_size]
             turnover_map = self._open_turnover_map(rank_rows)
             enrich_ms = (time.perf_counter() - t1) * 1000
 
@@ -839,6 +884,7 @@ class CaptureEngine:
             "db_written": len(numeric_rows) if db_error is None else 0,
             "db_error": db_error,
             "rotations": snap.get("rotations", 0),
+            "augmented": augmented,
         }
 
     def run_task(self, task: dict, cfg: dict) -> dict:
