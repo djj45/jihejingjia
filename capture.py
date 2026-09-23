@@ -20,6 +20,16 @@ DATA_DIR = BASE_DIR / "data"
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 
+
+def snapshot_day_dirs(day_or_started) -> tuple[Path, Path, Path]:
+    """快照目录结构：snapshots/年/月/日/{csv,png}。参数用 datetime 或 YYYYMMDD 字符串。"""
+    if isinstance(day_or_started, str):
+        day = day_or_started
+    else:
+        day = f"{day_or_started:%Y%m%d}"
+    day_dir = SNAPSHOT_DIR / day[:4] / day[4:6] / day
+    return day_dir, day_dir / "csv", day_dir / "png"
+
 # 排序字段：值为传给 realtime_rank 的 sort_by（eltdx 别名或原始编号）
 SORT_OPTIONS: dict[str, int | str] = {
     "开盘换手": 0x001E,
@@ -68,6 +78,8 @@ DEFAULT_CONFIG: dict = {
     "columns": DEFAULT_COLUMNS,
     "warmup_seconds": 90,
     "scheduler_enabled": True,
+    "auto_image": False,          # 每次截取后自动把 CSV 渲染成 PNG
+    "image_side_by_side": False,  # 同 image_group 的任务图片到齐后左右并排合成
     "tasks": [
         {"name": "开盘换手榜", "time": "09:15:00", "sort_by": "开盘换手", "ascending": False},
         {"name": "开盘金额榜", "time": "09:20:00", "sort_by": "开盘金额", "ascending": False},
@@ -811,6 +823,55 @@ class CaptureEngine:
                 amount=rec.amount, volume_hand=rec.total_hand, seal_amount=None))
         return rank_rows + add, [r.full_code for r in add]
 
+    def _generate_image(self, csv_path, png_dir: Path) -> Path | None:
+        """CSV -> 通达信配色 PNG（tools/csv2img 渲染器）。失败不影响榜单落盘。"""
+        try:
+            from tools.csv2img import render
+
+            return render(Path(csv_path), png_dir, 16, 2)
+        except Exception:
+            return None
+
+    def _merge_group_image(self, task: dict, cfg: dict, started: datetime) -> Path | None:
+        """同 image_group 任务的图片到齐后左右并排合成一张（黑底、顶对齐）。
+
+        每个成员取当日最新一张（重跑会刷新合成图）；任一成员缺图则本次不合成，
+        等下一个成员完成时再触发。"""
+        group = str(task.get("image_group") or "").strip()
+        if not group:
+            return None
+        members = [t for t in cfg.get("tasks", []) if str(t.get("image_group") or "").strip() == group]
+        if len(members) < 2:
+            return None
+        day = started.strftime("%Y%m%d")
+        _day_dir, _csv_dir, png_dir = snapshot_day_dirs(day)
+        if not png_dir.is_dir():
+            return None
+        picks: list[Path] = []
+        for m in members:
+            key = sanitize_filename(str(m.get("name") or ""))
+            pngs = sorted(p for p in png_dir.glob(f"{day}_*_{key}_*.png") if "_并排" not in p.stem)
+            if not pngs:
+                return None  # 组内还有任务没出图
+            picks.append(pngs[-1])
+        stamp = max(p.name.split("_")[1] for p in picks)
+        out = png_dir / f"{day}_{stamp}_{sanitize_filename(group)}_并排.png"
+        try:
+            from PIL import Image
+
+            gap = 16
+            imgs = [Image.open(p) for p in picks]
+            canvas = Image.new("RGB", (sum(im.width for im in imgs) + gap * (len(imgs) - 1),
+                                       max(im.height for im in imgs)), (0, 0, 0))
+            x = 0
+            for im in imgs:
+                canvas.paste(im, (x, 0))
+                x += im.width + gap
+            canvas.save(out)
+        except Exception:
+            return None
+        return out
+
     def _refresh_stale_rows(self, rank_rows):
         """0x054b 榜单页里无价格的行（典型：北交所股，节点首页不给行情簿）用 0x0547
         逐码刷新补齐，与桌面客户端显示同口径（桌面滚到可见窗口即显示涨幅）。
@@ -906,11 +967,11 @@ class CaptureEngine:
             numeric["industry"] = values["细分行业"] or None
             numeric_rows.append(numeric)
 
-        day_dir = SNAPSHOT_DIR / f"{started:%Y%m%d}"
-        day_dir.mkdir(parents=True, exist_ok=True)
+        day_dir, csv_dir, png_dir = snapshot_day_dirs(started)
+        csv_dir.mkdir(parents=True, exist_ok=True)
         direction = "升序" if task.get("ascending") else "降序"
         fname = f"{started:%Y%m%d}_{started:%H%M%S}_{sanitize_filename(task.get('name', 'task'))}_{sanitize_filename(task['sort_by'])}_{direction}.csv"
-        path = day_dir / fname
+        path = csv_dir / fname
         with open(path, "w", newline="", encoding="utf-8-sig") as fh:
             writer = csv.DictWriter(fh, fieldnames=columns)
             writer.writeheader()
@@ -931,6 +992,17 @@ class CaptureEngine:
         except Exception as exc:  # 库写失败不影响 CSV 产出
             db_error = f"{type(exc).__name__}: {exc}"
 
+        image_name = merged_name = None
+        if cfg.get("auto_image"):
+            png_dir.mkdir(parents=True, exist_ok=True)
+            png = self._generate_image(path, png_dir)
+            if png:
+                image_name = png.name
+                if cfg.get("image_side_by_side"):
+                    merged = self._merge_group_image(task, cfg, started)
+                    if merged:
+                        merged_name = merged.name
+
         return {
             "file": str(path),
             "file_name": fname,
@@ -945,6 +1017,8 @@ class CaptureEngine:
             "db_error": db_error,
             "rotations": snap.get("rotations", 0),
             "augmented": augmented,
+            "image": image_name,
+            "group_image": merged_name,
         }
 
     def run_task(self, task: dict, cfg: dict) -> dict:

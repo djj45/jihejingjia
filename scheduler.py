@@ -154,6 +154,10 @@ class Scheduler:
             if aug:
                 codes = ",".join(aug[:4]) + ("…" if len(aug) > 4 else "")
                 aug_text = f"，扫漏{len(aug)}只({codes})"
+            if result.get("group_image"):
+                aug_text += "，出图+并排"
+            elif result.get("image"):
+                aug_text += "，已出图"
             self._log(
                 "success",
                 f"[{name}] 完成：{result['count']} 行 -> {result['file_name']}"

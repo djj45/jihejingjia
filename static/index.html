@@ -38,8 +38,12 @@ input,select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font
 .pool button.used{border-color:var(--acc);color:var(--acc);background:#eff6ff}
 .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
 .snap-list{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.list-cap{font-size:12px;color:var(--sub);margin:8px 0 4px}
+.list-cap:first-of-type{margin-top:0}
 .snap-item{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
 .snap-item .fn{flex:1;word-break:break-all}
+.tag{display:inline-block;min-width:22px;text-align:center;padding:1px 6px;border-radius:6px;font-size:11px;color:#fff;background:var(--acc);margin-right:2px;vertical-align:1px}
+.tag.grp{background:var(--ok)}
 .loglist{max-height:260px;overflow:auto;font-size:12.5px;display:flex;flex-direction:column;gap:4px}
 .logline{padding:6px 10px;border-radius:6px;background:#f9fafb;border:1px solid var(--line);white-space:pre-wrap;word-break:break-all}
 .logline.error{border-color:#fecaca;background:#fef2f2;color:var(--err)}
@@ -54,9 +58,14 @@ thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
 .toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:10px;background:#111827;color:#fff;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
 .toast.show{opacity:.95}
 .toast.err{background:var(--err)}
+#lightbox{position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:99;display:none;align-items:center;justify-content:center;overflow:hidden}
+#lightbox img{max-width:94vw;max-height:86vh;transform-origin:center center;cursor:grab;user-select:none;-webkit-user-drag:none}
+.lb-bar{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:14px;align-items:center;background:rgba(17,24,39,.75);color:#e5e7eb;font-size:12px;padding:6px 16px;border-radius:10px}
+.lb-bar b{font-variant-numeric:tabular-nums;min-width:44px;text-align:center}
+.lb-bar button{color:#e5e7eb;background:transparent;border:1px solid #4b5563}
 .countdown{font-variant-numeric:tabular-nums;color:var(--acc);font-weight:600}
 .addform{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding-top:10px;border-top:1px dashed var(--line)}
-.grid2{display:grid;grid-template-columns:300px 1fr;gap:14px}
+.grid2{display:grid;grid-template-columns:440px 1fr;gap:14px}
 @media(max-width:800px){.grid2{grid-template-columns:1fr}}
 </style>
 </head>
@@ -92,17 +101,22 @@ thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
   <div class="row">
     <label>每页条数 <input id="page-size" type="number" min="1" max="80" style="width:80px"></label>
     <label>预热提前(秒) <input id="warmup" type="number" min="0" max="3600" style="width:80px"></label>
+    <label style="font-size:13px"><input type="checkbox" id="auto-image"> 图片自动生成</label>
+    <label style="font-size:13px" title="勾选后，图片分组相同的任务全部完成时，图片自动左右并排合成一张"><input type="checkbox" id="img-side"> 图片并排（同组到齐合成）</label>
     <button id="save" class="primary">保存全部配置</button>
     <span class="hint" style="color:var(--sub);font-size:12px">改动会自动保存并即时生效，此按钮可手动触发</span>
   </div>
 </section>
 
 <section>
-  <h2>快照浏览 <span class="hint">手动运行结果也会出现在当天文件里</span></h2>
+  <h2>快照与图片 <span class="hint">手动运行结果也会出现在当天文件里；图片由截取自动生成</span></h2>
   <div class="grid2">
     <div>
       <div class="row"><input id="snap-date" type="date"><button id="snap-refresh" class="small">刷新</button></div>
-      <div id="snap-list" class="snap-list"></div>
+      <div class="list-cap">CSV 快照</div>
+      <div id="snap-list" class="snap-list" style="max-height:340px"></div>
+      <div class="list-cap">生成图片（图=单任务，组=并排合成）</div>
+      <div id="img-list" class="snap-list" style="max-height:320px"></div>
     </div>
     <div id="snap-detail"></div>
   </div>
@@ -134,6 +148,10 @@ thead th{background:#f0f4fb;position:sticky;top:0;z-index:1}
 </section>
 </div>
 <div class="toast" id="toast"></div>
+<div id="lightbox">
+  <img id="lb-img" alt="预览大图">
+  <div class="lb-bar"><b id="lb-zoom">100%</b><span>滚轮缩放 · 拖动平移 · 双击复位 · Esc 或点空白处关闭</span><button id="lb-close">关闭</button></div>
+</div>
 
 <script>
 const $=s=>document.querySelector(s);
@@ -163,12 +181,14 @@ function renderTasks(){
       <input type="time" step="1" value="${t.time}">
       <select>${meta.sort_options.map(s=>`<option ${s===t.sort_by?"selected":""}>${s}</option>`).join("")}</select>
       <button class="small dir">${t.ascending?"升序 ↑":"降序 ↓"}</button>
+      <input class="grp" value="${esc(t.image_group||"")}" placeholder="图片分组" style="width:92px" title="图片分组：同组任务全部完成后，图片自动左右并排合成一张">
       <button class="small primary run">立即运行</button>
       <button class="small danger del">删除</button>`;
-    const nameIn=div.querySelector(".name"),timeIn=div.querySelector("input[type=time]"),sel=div.querySelector("select");
+    const nameIn=div.querySelector(".name"),timeIn=div.querySelector("input[type=time]"),sel=div.querySelector("select"),grpIn=div.querySelector(".grp");
     nameIn.onchange=()=>{t.name=nameIn.value.trim()||t.name;nameIn.value=t.name;autoSave()};
     timeIn.onchange=()=>{t.time=timeIn.value||t.time;autoSave()};
     sel.onchange=()=>{t.sort_by=sel.value;autoSave()};
+    grpIn.onchange=()=>{const v=grpIn.value.trim();if(v)t.image_group=v;else delete t.image_group;autoSave()};
     div.querySelector(".dir").onclick=e=>{t.ascending=!t.ascending;e.target.textContent=t.ascending?"升序 ↑":"降序 ↓";autoSave()};
     div.querySelector(".del").onclick=()=>{cfg.tasks.splice(i,1);renderTasks();autoSave()};
     div.querySelector(".run").onclick=async e=>{
@@ -210,9 +230,11 @@ function renderCols(){
 async function loadSnaps(){
   const d=$("#snap-date").value.replace(/-/g,"");
   const res=await api(`/api/snapshots?day=${d}`);
-  const box=$("#snap-list");box.innerHTML="";
-  if(!res.files.length){box.innerHTML='<span style="color:var(--sub)">当天暂无快照</span>';return}
-  res.files.forEach(f=>{
+  const csvs=res.files.filter(f=>(f.type||"csv")!=="png"&&!f.name.toLowerCase().endsWith(".png"));
+  const pngs=res.files.filter(f=>!csvs.includes(f));
+  const csvBox=$("#snap-list");csvBox.innerHTML="";
+  if(!csvs.length)csvBox.innerHTML='<span style="color:var(--sub)">当天暂无快照</span>';
+  csvs.forEach(f=>{
     const div=document.createElement("div");div.className="snap-item";
     div.innerHTML=`<span class="fn">${esc(f.name)}</span><span style="color:var(--sub);font-size:12px">${(f.size/1024).toFixed(1)}KB</span>
       <a href="/api/snapshots/download?path=${encodeURIComponent(f.path)}"><button class="small">下载</button></a>`;
@@ -220,8 +242,58 @@ async function loadSnaps(){
       const c=await api(`/api/snapshots/content?path=${encodeURIComponent(f.path)}`);
       showTable(c.columns,c.rows,f.name);
     };
-    box.appendChild(div);
+    csvBox.appendChild(div);
   });
+  const imgBox=$("#img-list");imgBox.innerHTML="";
+  if(!pngs.length)imgBox.innerHTML='<span style="color:var(--sub)">暂无图片（勾选「图片自动生成」后产生）</span>';
+  pngs.forEach(f=>{
+    const grp=f.name.includes("_并排");
+    const div=document.createElement("div");div.className="snap-item";
+    div.innerHTML=`<span class="fn"><span class="tag${grp?" grp":""}">${grp?"组":"图"}</span> ${esc(f.name)}</span><span style="color:var(--sub);font-size:12px">${(f.size/1024).toFixed(1)}KB</span>
+      <a href="/api/snapshots/download?path=${encodeURIComponent(f.path)}"><button class="small">下载</button></a>`;
+    div.querySelector(".fn").onclick=()=>showImage(f);
+    imgBox.appendChild(div);
+  });
+}
+function showImage(f){
+  $("#snap-detail").innerHTML=`<div style="font-size:13px;color:var(--sub);margin-bottom:6px">${esc(f.name)}（点击图片放大）</div>
+    <img src="/api/snapshots/download?path=${encodeURIComponent(f.path)}" alt="${esc(f.name)}"
+      style="max-width:100%;border:1px solid var(--line);border-radius:8px;background:#000;cursor:zoom-in">`;
+  $("#snap-detail").querySelector("img").onclick=e=>openLightbox(e.target.src);
+}
+
+/* ---------- 灯箱：滚轮缩放 + 拖动平移 ---------- */
+let lbScale=1,lbX=0,lbY=0,lbDrag=null;
+function lbApply(){
+  $("#lb-img").style.transform=`translate(${lbX}px,${lbY}px) scale(${lbScale})`;
+  $("#lb-zoom").textContent=Math.round(lbScale*100)+"%";
+}
+function openLightbox(src){
+  lbScale=1;lbX=0;lbY=0;lbDrag=null;
+  $("#lb-img").src=src;
+  $("#lightbox").style.display="flex";
+  lbApply();
+}
+function closeLightbox(){
+  $("#lightbox").style.display="none";
+  $("#lb-img").src="";
+}
+function initLightbox(){
+  const box=$("#lightbox"),im=$("#lb-img");
+  box.addEventListener("mousedown",e=>{if(e.target===box)closeLightbox()});
+  $("#lb-close").onclick=closeLightbox;
+  document.addEventListener("keydown",e=>{if(e.key==="Escape"&&box.style.display==="flex")closeLightbox()});
+  im.addEventListener("wheel",e=>{
+    e.preventDefault();
+    const old=lbScale;
+    lbScale=Math.min(10,Math.max(0.1,lbScale*(e.deltaY<0?1.15:1/1.15)));
+    lbX*=lbScale/old;lbY*=lbScale/old;  // 缩放时按比例补偿平移，视觉上围绕中心
+    lbApply();
+  },{passive:false});
+  im.addEventListener("mousedown",e=>{e.preventDefault();lbDrag={x:e.clientX-lbX,y:e.clientY-lbY};im.style.cursor="grabbing"});
+  document.addEventListener("mousemove",e=>{if(!lbDrag)return;lbX=e.clientX-lbDrag.x;lbY=e.clientY-lbDrag.y;lbApply()});
+  document.addEventListener("mouseup",()=>{lbDrag=null;im.style.cursor="grab"});
+  im.addEventListener("dblclick",()=>{lbScale=1;lbX=0;lbY=0;lbApply()});
 }
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 
@@ -349,8 +421,16 @@ function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&l
   $("#add-sort").value="涨幅";
   $("#page-size").value=cfg.page_size;
   $("#warmup").value=cfg.warmup_seconds;
+  const syncImgToggles=()=>{
+    $("#auto-image").checked=!!cfg.auto_image;
+    $("#img-side").checked=!!cfg.image_side_by_side;
+    $("#img-side").disabled=!cfg.auto_image;
+  };
+  syncImgToggles();
+  $("#auto-image").onchange=e=>{cfg.auto_image=e.target.checked;if(!cfg.auto_image)cfg.image_side_by_side=false;syncImgToggles();autoSave()};
+  $("#img-side").onchange=e=>{cfg.image_side_by_side=e.target.checked;autoSave()};
   $("#snap-date").value=meta.today;
-  renderTasks();renderCols();loadSnaps();initDb();
+  renderTasks();renderCols();loadSnaps();initDb();initLightbox();
   $("#add-btn").onclick=()=>{
     const name=$("#add-name").value.trim()||"任务"+(cfg.tasks.length+1);
     cfg.tasks.push({name,time:$("#add-time").value||"09:30:00",sort_by:$("#add-sort").value,ascending:false});

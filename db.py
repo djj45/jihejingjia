@@ -148,7 +148,9 @@ def import_csvs() -> dict:
     if not SNAPSHOT_DIR.is_dir():
         return stats
     fname_re = re.compile(r"^(?:(\d{8})_)?(\d{6})_(.+?)_(.+?)_(升序|降序)\.csv$")
-    for csv_path in sorted(SNAPSHOT_DIR.glob("*/*.csv")):
+    # 新结构 snapshots/年/月/日/csv/*.csv + 旧结构 snapshots/日/*.csv 兼容
+    csvs = sorted(SNAPSHOT_DIR.glob("*/*.csv")) + sorted(SNAPSHOT_DIR.glob("*/*/*/csv/*.csv"))
+    for csv_path in csvs:
         if fname_re.match(csv_path.name) is None:
             continue
         with _lock, _connect() as conn:

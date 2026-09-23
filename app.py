@@ -72,6 +72,8 @@ class ConfigPayload(BaseModel):
     warmup_seconds: int
     scheduler_enabled: bool
     tasks: list[dict]
+    auto_image: bool = False
+    image_side_by_side: bool = False
 
 
 @app.get("/")
@@ -157,12 +159,25 @@ def run_now(payload: RunPayload):
 @app.get("/api/snapshots")
 def list_snapshots(day: str | None = None):
     target = day or date.today().strftime("%Y%m%d")
-    day_dir = SNAPSHOT_DIR / target
-    if not day_dir.is_dir():
-        return {"date": target, "files": []}
+    # 新结构 snapshots/年/月/日/{csv,png}；旧结构 snapshots/日 平铺（兼容未迁移的历史日）
+    candidates = [
+        SNAPSHOT_DIR / target[:4] / target[4:6] / target,
+        SNAPSHOT_DIR / target,
+    ]
+    entries: list[Path] = []
+    for d in candidates:
+        if not d.is_dir():
+            continue
+        entries += list(d.glob("*.csv")) + list(d.glob("*.png"))
+        for sub in ("csv", "png"):
+            s = d / sub
+            if s.is_dir():
+                entries += list(s.glob("*.csv")) + list(s.glob("*.png"))
     files = sorted(
-        ({"name": p.name, "path": str(p), "size": p.stat().st_size, "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S")}
-         for p in day_dir.glob("*.csv")),
+        ({"name": p.name, "path": str(p), "size": p.stat().st_size,
+          "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S"),
+          "type": "png" if p.suffix.lower() == ".png" else "csv"}
+         for p in entries),
         key=lambda item: item["name"],
         reverse=True,
     )
@@ -186,7 +201,8 @@ def snapshot_download(path: str):
     target = Path(path).resolve()
     if not str(target).startswith(str(SNAPSHOT_DIR.resolve())) or not target.is_file():
         raise HTTPException(status_code=403, detail="invalid path")
-    return FileResponse(target, filename=target.name, media_type="text/csv")
+    media = "image/png" if target.suffix.lower() == ".png" else "text/csv"
+    return FileResponse(target, filename=target.name, media_type=media)
 
 
 # ---------- 历史数据库 ----------
