@@ -153,7 +153,7 @@ class Scheduler:
             aug_text = ""
             if aug:
                 codes = ",".join(aug[:4]) + ("…" if len(aug) > 4 else "")
-                aug_text = f"，涨幅榜补漏{len(aug)}只({codes})"
+                aug_text = f"，扫漏{len(aug)}只({codes})"
             self._log(
                 "success",
                 f"[{name}] 完成：{result['count']} 行 -> {result['file_name']}"

@@ -732,44 +732,83 @@ class CaptureEngine:
                 amount=r.amount, volume_hand=r.volume_hand, seal_amount=None)
         return out
 
-    def _augment_seal_rows(self, rank_rows, task: dict, cfg: dict, started: datetime):
-        """竞价封单榜补漏：涨幅榜（价格源）发现封板股。
+    def _market_walk_rows(self, category: str) -> dict:
+        """代码序全市场扫描：逐页拉 0x054b（sort=代码），返回 code -> 记录。
 
-        服务端 0x054b 封单排序对个股有逐股放行滞后（2026-09-22 实测：综艺股份等
-        09:15:08 才进入排序页，新华传媒队列 09:15:03 已 94.7亿 却直到 09:19:59
-        才上榜），纯镜像排序页会整行漏股；桌面客户端正确是因为本地簿重排。这里按
-        任务方向取涨幅榜头部（降序=涨停在前，升序=跌停在前），把不在封单页里的
-        封板候选并入，封单真源仍由 _auction_seal_patch 取 0x056a。返回(行, 漏股代码)。"""
+        代码序是静态索引，不存在竞价头几秒派生排序（封单/涨幅）逐股放行的
+        "未成形"问题；这是桌面客户端维持完整本地簿的思路。结果缓存 30 秒，
+        同刻多任务共享一次扫描（~70 页 ×15ms ≈ 1s）。"""
+        now = time.time()
+        cache = getattr(self, "_walk_cache", None)
+        if cache and now - cache[0] < 30:
+            return cache[1]
+        found: dict = {}
+        start = 0
+        for _ in range(120):  # 全市场约 70 页，上限防异常死循环
+            page = self.client.quotes.list_by_category(
+                category, sort_by=SORT_OPTIONS["代码"], start=start, count=80, ascending=False)
+            records = list(getattr(page, "records", ()) or ())
+            if not records:
+                break
+            for rec in records:
+                found[rec.full_code] = rec
+            start += len(records)
+            if len(records) < 80:
+                break
+        self._walk_cache = (now, found)
+        return found
+
+    def _augment_seal_rows(self, rank_rows, task: dict, cfg: dict, started: datetime):
+        """竞价封单榜补漏：代码序全市场扫描发现封板股。
+
+        服务端派生排序对个股逐股放行（2026-09-22 新华传媒队列 94.7亿 迟到 5 分钟；
+        2026-09-23 实测 09:14:59 封单榜与涨幅榜前 20 全是空行，09:15:03 时涨幅榜
+        仍缺新华传媒，涨幅榜补漏只捞到 1 只）。代码序扫描不受影响，把不在封单页
+        里的封板股（竞价形态=虚拟价贴涨/跌停价；09:25 撮合后连续形态=一侧为空）
+        并入榜单，封单真源仍由 _auction_seal_patch 取 0x056a。返回(行, 漏股代码)。"""
         if not (dtime(9, 14, 50) <= started.time() <= dtime(9, 25, 10)):
             return rank_rows, []
         try:
-            page = self.client.helpers.realtime_rank(
-                category=cfg.get("category", "沪深A股"),
-                sort_by=SORT_OPTIONS["涨幅"],
-                count=100,
-                ascending=bool(task.get("ascending", False)),
-            )
-            extra = list(page.rows)
+            market = self._market_walk_rows(cfg.get("category", "沪深A股"))
         except Exception:
             return rank_rows, []  # 补漏失败不影响主榜单
         known = {r.full_code for r in rank_rows}
+        cand: list[str] = []
+        for code, rec in market.items():
+            if code in known:
+                continue
+            if rec.last_price:  # 连续形态（09:25 撮合后）：一侧为空即封板
+                if not ((rec.bid1 and not rec.ask1) or (rec.ask1 and not rec.bid1)):
+                    continue
+            else:  # 竞价形态：虚拟撮合价（任一侧）贴涨/跌停价
+                vprice = rec.bid1 or rec.ask1
+                pre = rec.pre_close_price
+                ratio = _limit_ratio_pct(code, None)
+                if not vprice or not pre or not ratio:
+                    continue
+                up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
+                down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
+                if not (abs(vprice - up) <= 0.005 or abs(vprice - down) <= 0.005):
+                    continue
+            cand.append(code)
+        if not cand:
+            return rank_rows, []
+        try:
+            security_map = self.client.helpers._security_map(cand)
+        except Exception:
+            security_map = {}
         add = []
-        for r in extra:
-            if r.full_code in known:
-                continue
-            raw = r.raw
-            if raw.last_price or not (raw.bid1 or raw.ask1):
-                continue  # 非竞价行（虚拟撮合价可能在任一侧，含头几秒的单边簿）
-            pre = raw.pre_close_price or r.pre_close
-            ratio = _limit_ratio_pct(r.full_code, r.name)
-            if not pre or not ratio:
-                continue
-            up = round(pre * (1.0 + ratio / 100.0) + 1e-9, 2)
-            down = round(pre * (1.0 - ratio / 100.0) + 1e-9, 2)
-            vprice = raw.bid1 or raw.ask1
-            if abs(vprice - up) <= 0.005 or abs(vprice - down) <= 0.005:
-                add.append(r)
-                known.add(r.full_code)
+        for code in cand:
+            name = getattr(security_map.get(code), "name", None)
+            if not _limit_ratio_pct(code, name):
+                continue  # N/C 新股无涨跌幅限制，不存在封板
+            rec = market[code]
+            pre = rec.pre_close_price
+            add.append(SimpleNamespace(
+                rank=0, full_code=code, name=name, raw=rec,
+                pre_close=pre, last_price=rec.last_price,
+                change_pct=((rec.last_price - pre) / pre * 100) if rec.last_price and pre else None,
+                amount=rec.amount, volume_hand=rec.total_hand, seal_amount=None))
         return rank_rows + add, [r.full_code for r in add]
 
     def _refresh_stale_rows(self, rank_rows):
@@ -797,6 +836,9 @@ class CaptureEngine:
                 pre = float(rec.last_close_price or 0) or r.pre_close
                 last = float(rec.last_price)
                 raw = SimpleNamespace(
+                    market_id=getattr(rec, "market_id", None)
+                    or {"sh": 1, "sz": 0, "bj": 2}.get(r.full_code[:2], -1),
+                    code=r.full_code[2:],
                     pre_close_price=pre,
                     last_price=last,
                     open_price=float(rec.open_price or 0),
