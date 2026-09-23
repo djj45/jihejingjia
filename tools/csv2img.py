@@ -26,7 +26,10 @@ WHITE = (255, 255, 255)
 GRAY = (128, 128, 128)
 LINE = (56, 56, 56)
 
+_DIR = Path(__file__).resolve().parent.parent
+
 FONT_CANDIDATES = [
+    str(_DIR / "fonts" / "simhei.ttf"),  # 服务器（Linux 无系统中文字体时放这里）
     r"C:\Windows\Fonts\simhei.ttf",   # 黑体
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\simsun.ttc",

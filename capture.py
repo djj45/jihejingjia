@@ -6,8 +6,10 @@ import csv
 import json
 import random
 import re
+import sys
 import threading
 import time
+import traceback
 import urllib.request
 from datetime import date, datetime, time as dtime
 from pathlib import Path
@@ -830,6 +832,7 @@ class CaptureEngine:
 
             return render(Path(csv_path), png_dir, 16, 2)
         except Exception:
+            print("[image] 出图失败:", traceback.format_exc(), file=sys.stderr, flush=True)
             return None
 
     def _merge_group_image(self, task: dict, cfg: dict, started: datetime) -> Path | None:

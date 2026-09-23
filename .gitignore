@@ -12,3 +12,6 @@ config.json
 # 协议逆向临时产物
 rev/
 *.pcapng
+
+# 服务器中文字体（simhei.ttf 手动放置，不入库）
+fonts/
