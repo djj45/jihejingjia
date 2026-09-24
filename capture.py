@@ -82,6 +82,7 @@ DEFAULT_CONFIG: dict = {
     "scheduler_enabled": True,
     "auto_image": False,          # 每次截取后自动把 CSV 渲染成 PNG
     "image_side_by_side": False,  # 同 image_group 的任务图片到齐后左右并排合成
+    "local_rank": True,           # 撮合后全市场拉取+本地排序（排序键与展示值同源）
     "tasks": [
         {"name": "开盘换手榜", "time": "09:15:00", "sort_by": "开盘换手", "ascending": False},
         {"name": "开盘金额榜", "time": "09:20:00", "sort_by": "开盘金额", "ascending": False},
@@ -392,6 +393,72 @@ def _seal_amount(rank_row) -> float | None:
     if not raw.bid1 and raw.ask1 and raw.ask_vol1:
         return raw.ask1 * raw.ask_vol1 * 100.0  # 跌停封单（卖一）
     return None
+
+
+_RECORD_SORT_FIELDS = {
+    "涨速": "rise_speed",
+    "短换手": "short_turnover",
+    "量涨速": "vol_rise_speed",
+    "开盘抢筹": "opening_rush",
+    "2分钟金额": "min2_amount",
+}
+
+
+def _record_sort_value(sort_by: str, rec, stats_res, before_open_cont: bool) -> float | None:
+    """代码序扫描记录的本地排序键，与展示列同源同口径。
+
+    服务端 0x054b 排序键在服务端自算（2026-09-24 实测 925 开盘金额榜前 60 行
+    10 处逆序、开盘换手榜 1 处），改用全量扫描记录本地算键后排序即严格一致。
+    回撤/攻击等服务端专有排序无本地口径，返回 None（继续走服务端排序）。"""
+    def f(name):
+        return getattr(rec, name, None)
+
+    pre = f("pre_close_price")
+    if sort_by == "开盘金额":
+        return f("open_amount") or None
+    if sort_by == "开盘换手":
+        oa = f("open_amount")
+        op = f("open_price") or (f("last_price") if before_open_cont else None)
+        if not oa or not op or stats_res is None:
+            return None
+        try:
+            stat_row, _ = stats_res.row(f("market_id"), f("code"))
+        except Exception:
+            return None
+        ffs = getattr(stat_row, "free_float_shares_10k", None) if stat_row else None
+        if not ffs:
+            return None
+        return (oa / (op * 100.0)) * 100.0 / (ffs * 10000.0) * 100.0
+    if sort_by == "涨幅":
+        pct = f("change_pct")
+        if pct is not None:
+            return pct
+        last = f("last_price")
+        return (last - pre) / pre * 100.0 if last and pre else None
+    if sort_by == "现价":
+        return f("last_price")
+    if sort_by == "成交额":
+        return f("amount")
+    if sort_by in _RECORD_SORT_FIELDS:
+        return f(_RECORD_SORT_FIELDS[sort_by])
+    if sort_by == "开盘涨幅":
+        op = f("open_price") or (f("last_price") if before_open_cont else None)
+        return (op - pre) / pre * 100.0 if op and pre else None
+    if sort_by == "最高涨幅":
+        hi = f("high_price")
+        return (hi - pre) / pre * 100.0 if hi and pre else None
+    if sort_by == "最低涨幅":
+        lo = f("low_price")
+        return (lo - pre) / pre * 100.0 if lo and pre else None
+    if sort_by == "封单额":
+        # 连续形态封板口径与 _seal_amount 相同：一侧为空，另一侧价×量
+        bid1, ask1 = f("bid1"), f("ask1")
+        if bid1 and not ask1 and f("bid_vol1"):
+            return bid1 * f("bid_vol1") * 100.0
+        if ask1 and not bid1 and f("ask_vol1"):
+            return ask1 * f("ask_vol1") * 100.0
+        return None
+    return None  # 回撤/攻击/代码：服务端专有或无需排序
 
 
 def _numeric_values(rank_row, open_turnover_pct, before_open_cont: bool = False) -> dict:
@@ -825,6 +892,56 @@ class CaptureEngine:
                 amount=rec.amount, volume_hand=rec.total_hand, seal_amount=None))
         return rank_rows + add, [r.full_code for r in add]
 
+    def _local_rank(self, task: dict, cfg: dict, started: datetime):
+        """撮合后（≥09:25）全市场代码序扫描 + 本地排序取前 N，替代服务端排序。
+
+        服务端排序键与本地展示值不同源导致乱序/漏股（2026-09-24 实测 925 开盘
+        金额榜 10 处逆序），代码序静态索引无逐股放行问题；扫描 ~70 页结果缓存
+        30 秒，同刻多任务共享。竞价窗口（撮合前）与回撤/攻击等服务端专有排序
+        仍走原路径。失败返回 None（回退服务端榜单）。"""
+        if started.time() < dtime(9, 25, 0) or task["sort_by"] in ("回撤", "攻击", "代码"):
+            return None
+        try:
+            market = self._market_walk_rows(cfg.get("category", "沪深A股"))
+        except Exception:
+            return None
+        if not market:
+            return None
+        try:
+            stats = self._stats_for_today()
+        except Exception:
+            stats = None
+        before_open_cont = started.time() < dtime(9, 30)
+        keyed = []
+        for code, rec in market.items():
+            value = _record_sort_value(task["sort_by"], rec, stats, before_open_cont)
+            if value is None:
+                continue
+            keyed.append((value, code, rec))
+        ascending = bool(task.get("ascending"))
+        keyed.sort(key=lambda item: (item[0], item[1]), reverse=not ascending)
+        page_size = int(cfg.get("page_size", 60))
+        top = keyed[:page_size]
+        if not top:
+            return None
+        try:
+            security_map = self.client.helpers._security_map([code for _, code, _ in top])
+        except Exception:
+            security_map = {}
+        out = []
+        for rank, (value, code, rec) in enumerate(top, 1):
+            pre = rec.pre_close_price
+            last = rec.last_price
+            pct = getattr(rec, "change_pct", None)
+            if pct is None and last and pre:
+                pct = (last - pre) / pre * 100.0
+            out.append(SimpleNamespace(
+                rank=rank, full_code=code,
+                name=getattr(security_map.get(code), "name", None),
+                raw=rec, pre_close=pre, last_price=last, change_pct=pct,
+                amount=rec.amount, volume_hand=rec.total_hand, seal_amount=None))
+        return out
+
     def _generate_image(self, csv_path, png_dir: Path) -> Path | None:
         """CSV -> 通达信配色 PNG（tools/csv2img 渲染器）。失败不影响榜单落盘。"""
         try:
@@ -937,12 +1054,21 @@ class CaptureEngine:
         with self._lock:
             client = self.client
             t1 = time.perf_counter()
+            local_rows = self._local_rank(task, cfg, started) if cfg.get("local_rank", True) else None
             augmented: list[str] = []
-            if task.get("sort_by") == "封单额":
-                rank_rows, augmented = self._augment_seal_rows(rank_rows, task, cfg, started)
-            seal_patch = self._auction_seal_patch(rank_rows, started)
-            if seal_patch:
-                rank_rows = [seal_patch.get(r.full_code, r) for r in rank_rows]
+            if local_rows is not None:
+                rank_rows = local_rows  # 全量拉取本地排序：排序键与展示值同源，无需补漏/重排
+            else:
+                if task.get("sort_by") == "封单额":
+                    rank_rows, augmented = self._augment_seal_rows(rank_rows, task, cfg, started)
+                seal_patch = self._auction_seal_patch(rank_rows, started)
+                if seal_patch:
+                    rank_rows = [seal_patch.get(r.full_code, r) for r in rank_rows]
+                if task.get("sort_by") == "封单额":
+                    rank_rows = _rerank_by_seal(rank_rows, bool(task.get("ascending")))
+                    page_size = int(cfg.get("page_size", 60))
+                    if len(rank_rows) > page_size:  # 补漏并入后裁回页大小（尾部无封单行沉底）
+                        rank_rows = rank_rows[:page_size]
             refreshed = self._refresh_stale_rows(rank_rows)
             if refreshed:
                 rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
