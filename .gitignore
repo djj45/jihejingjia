@@ -15,3 +15,6 @@ rev/
 
 # 服务器中文字体（simhei.ttf 手动放置，不入库）
 fonts/
+
+# macOS 文件夹元数据
+.DS_Store
