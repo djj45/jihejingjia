@@ -1072,7 +1072,7 @@ class CaptureEngine:
             refreshed = self._refresh_stale_rows(rank_rows)
             if refreshed:
                 rank_rows = [refreshed.get(r.full_code, r) for r in rank_rows]
-            if task.get("sort_by") == "封单额":
+            if local_rows is None and task.get("sort_by") == "封单额":
                 rank_rows = _rerank_by_seal(rank_rows, bool(task.get("ascending")))
                 page_size = int(cfg.get("page_size", 60))
                 if len(rank_rows) > page_size:  # 补漏并入后裁回页大小（尾部无封单行沉底）
